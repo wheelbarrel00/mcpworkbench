@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { discoverAll, flattenServers } from "./discovery";
+import { discoverAll } from "./discovery";
 import { DiscoveredServer, McpSource, ScannedFile } from "./types";
 
 const SOURCE_LABELS: Record<McpSource, string> = {
@@ -11,9 +11,10 @@ const SOURCE_LABELS: Record<McpSource, string> = {
   "claude-desktop": "Claude Desktop",
 };
 
-type Node = SourceNode | ServerNode;
+type Node = SourceNode | ServerNode | NoteNode;
 interface SourceNode { kind: "source"; source: McpSource; files: ScannedFile[]; }
 interface ServerNode { kind: "server"; server: DiscoveredServer; }
+interface NoteNode { kind: "note"; text: string; level: "info" | "error" | "warning"; }
 
 export class ServersProvider implements vscode.TreeDataProvider<Node> {
   private _onDidChange = new vscode.EventEmitter<void>();
@@ -36,7 +37,14 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
       }));
     }
     if (node.kind === "source") {
-      return node.files.flatMap((f) => f.servers).map((server) => ({ kind: "server", server }));
+      const servers: Node[] = node.files
+        .flatMap((f) => f.servers)
+        .map((server) => ({ kind: "server", server }));
+      const issues: Node[] = node.files
+        .flatMap((f) => f.fileIssues)
+        .map((issue) => ({ kind: "note", text: issue.message, level: issue.level }));
+      const children = [...servers, ...issues];
+      return children.length ? children : [{ kind: "note", text: "No servers found", level: "info" }];
     }
     return [];
   }
@@ -45,6 +53,14 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     if (node.kind === "source") {
       const item = new vscode.TreeItem(SOURCE_LABELS[node.source], vscode.TreeItemCollapsibleState.Expanded);
       item.iconPath = new vscode.ThemeIcon("server-environment");
+      return item;
+    }
+    if (node.kind === "note") {
+      const item = new vscode.TreeItem(node.text, vscode.TreeItemCollapsibleState.None);
+      item.iconPath = new vscode.ThemeIcon(
+        node.level === "error" ? "error" : node.level === "warning" ? "warning" : "info",
+      );
+      item.tooltip = node.text;
       return item;
     }
     const { server } = node;

@@ -1,5 +1,6 @@
 .vscode/**
 .cursor/**
+.mcp.json
 src/**
 **/*.map
 node_modules/**
