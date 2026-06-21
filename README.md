@@ -68,7 +68,7 @@ Open the folder in VS Code or Cursor and press **F5** to launch an Extension Dev
 
 ```bash
 npx @vscode/vsce package
-cursor --install-extension mcp-workbench-0.2.0.vsix
+cursor --install-extension mcp-workbench-wb00-0.2.1.vsix
 ```
 
 Then reload Cursor and open the MCP Workbench panel from the activity bar.

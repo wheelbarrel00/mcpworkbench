@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.2.0";
+const CLIENT_VERSION = "0.2.1";
 
 export interface ToolSummary {
   name: string;

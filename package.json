@@ -1,8 +1,8 @@
 {
-  "name": "mcp-workbench",
-  "displayName": "MCP Workbench",
+  "name": "mcp-workbench-wb00",
+  "displayName": "MCP Workbench: Discover & Test",
   "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "icon": "media/logo.png",
   "publisher": "wheelbarrel00",

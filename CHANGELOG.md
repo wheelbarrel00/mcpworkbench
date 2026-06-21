@@ -4,6 +4,12 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-21
+
+### Changed
+
+- Published under the extension id `mcp-workbench-wb00` with the display name "MCP Workbench: Discover & Test" so the extension can ship to the VS Code Marketplace, where the previous display name was already taken.
+
 ## [0.2.0] - 2026-06-21
 
 ### Added

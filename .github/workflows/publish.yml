@@ -75,7 +75,8 @@ jobs:
             exit 0
           fi
           VERSION="${TAG#v}"
-          VSIX="mcp-workbench-${VERSION}.vsix"
+          NAME=$(node -p "require('./package.json').name")
+          VSIX="${NAME}-${VERSION}.vsix"
           cp extension.vsix "$VSIX"
           awk -v hdr="## [$VERSION]" 'index($0, hdr)==1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
           if [ -s notes.md ]; then
