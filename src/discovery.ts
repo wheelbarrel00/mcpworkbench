@@ -1,0 +1,173 @@
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import {
+  ConfigIssue,
+  DiscoveredServer,
+  McpSource,
+  McpTransport,
+  ScannedFile,
+} from "./types";
+
+interface ConfigLocation {
+  source: McpSource;
+  rootKey: "servers" | "mcpServers";
+  resolve: (workspaceFolder?: string) => string | undefined;
+  scoped: "global" | "workspace";
+}
+
+const home = os.homedir();
+
+const LOCATIONS: ConfigLocation[] = [
+  { source: "cursor-global", rootKey: "mcpServers", scoped: "global",
+    resolve: () => path.join(home, ".cursor", "mcp.json") },
+  { source: "cursor-workspace", rootKey: "mcpServers", scoped: "workspace",
+    resolve: (ws) => (ws ? path.join(ws, ".cursor", "mcp.json") : undefined) },
+
+  { source: "vscode-workspace", rootKey: "servers", scoped: "workspace",
+    resolve: (ws) => (ws ? path.join(ws, ".vscode", "mcp.json") : undefined) },
+
+  { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace",
+    resolve: (ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
+  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global",
+    resolve: () => path.join(home, ".claude.json") },
+
+  { source: "claude-desktop", rootKey: "mcpServers", scoped: "global",
+    resolve: () => path.join(home, ".claude", "claude_desktop_config.json") },
+];
+
+function parseLoose(text: string): unknown {
+  const noComments = text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'])\/\/.*$/gm, "$1");
+  const noTrailingCommas = noComments.replace(/,(\s*[}\]])/g, "$1");
+  return JSON.parse(noTrailingCommas);
+}
+
+function normalizeTransport(entry: any): {
+  transport: McpTransport | undefined;
+  issues: ConfigIssue[];
+} {
+  const issues: ConfigIssue[] = [];
+
+  if (typeof entry?.command === "string") {
+    const args: string[] = Array.isArray(entry.args) ? entry.args.map(String) : [];
+    const env: Record<string, string> = entry.env && typeof entry.env === "object" ? entry.env : {};
+
+    if (!entry.command.trim()) {
+      issues.push({ level: "error", code: "empty-command", message: "stdio server has an empty command." });
+    }
+    if (/(^|\/)npx$/.test(entry.command) && !args.includes("-y") && !args.includes("--yes")) {
+      issues.push({
+        level: "warning",
+        code: "npx-missing-y",
+        message: "npx without -y/--yes can hang waiting for an install prompt. Add \"-y\" to args.",
+      });
+    }
+    issues.push(...missingEnvIssues(env));
+    return { transport: { kind: "stdio", command: entry.command, args, env }, issues };
+  }
+
+  if (typeof entry?.url === "string") {
+    const headers: Record<string, string> = entry.headers && typeof entry.headers === "object" ? entry.headers : {};
+    const t = String(entry.type ?? "").toLowerCase();
+    const kind: "http" | "sse" = t === "sse" ? "sse" : "http";
+    issues.push(...missingEnvIssues(headers));
+    return { transport: { kind, url: entry.url, headers }, issues };
+  }
+
+  issues.push({
+    level: "error",
+    code: "unknown-transport",
+    message: "Entry has neither a `command` (stdio) nor a `url` (http/sse).",
+  });
+  return { transport: undefined, issues };
+}
+
+function missingEnvIssues(obj: Record<string, string>): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  for (const value of Object.values(obj)) {
+    if (typeof value !== "string") continue;
+    for (const m of value.matchAll(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi)) {
+      const name = m[1];
+      if (process.env[name] === undefined) {
+        issues.push({
+          level: "warning",
+          code: "env-unset",
+          message: `References environment variable ${name}, which is not set in your environment.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
+  const result: ScannedFile = {
+    path: p ?? "(unresolved)",
+    source: loc.source,
+    exists: false,
+    fileIssues: [],
+    servers: [],
+  };
+  if (!p || !fs.existsSync(p)) return result;
+  result.exists = true;
+
+  let parsed: any;
+  try {
+    parsed = parseLoose(fs.readFileSync(p, "utf8"));
+  } catch (e) {
+    result.fileIssues.push({
+      level: "error",
+      code: "bad-json",
+      message: `Could not parse JSON: ${(e as Error).message}`,
+    });
+    return result;
+  }
+
+  const block = parsed?.[loc.rootKey];
+  if (!block || typeof block !== "object") {
+    const otherKey = loc.rootKey === "servers" ? "mcpServers" : "servers";
+    const hint = parsed?.[otherKey]
+      ? ` Found "${otherKey}" instead — this editor expects "${loc.rootKey}".`
+      : "";
+    result.fileIssues.push({
+      level: "error",
+      code: "missing-root-key",
+      message: `No "${loc.rootKey}" object at the top level; no servers will load.${hint}`,
+    });
+    return result;
+  }
+
+  for (const [name, entry] of Object.entries<any>(block)) {
+    const { transport, issues } = normalizeTransport(entry);
+    if (!transport) {
+      result.servers.push({
+        name, source: loc.source, configPath: p, rootKey: loc.rootKey,
+        raw: entry, issues,
+        transport: { kind: "stdio", command: "", args: [], env: {} },
+      });
+      continue;
+    }
+    result.servers.push({ name, transport, source: loc.source, configPath: p, rootKey: loc.rootKey, raw: entry, issues });
+  }
+  return result;
+}
+
+export function discoverAll(workspaceFolders: string[]): ScannedFile[] {
+  const files: ScannedFile[] = [];
+  for (const loc of LOCATIONS) {
+    if (loc.scoped === "global") {
+      files.push(scanPath(loc, loc.resolve()));
+    } else {
+      for (const ws of workspaceFolders) {
+        files.push(scanPath(loc, loc.resolve(ws)));
+      }
+    }
+  }
+  return files;
+}
+
+export function flattenServers(files: ScannedFile[]): DiscoveredServer[] {
+  return files.flatMap((f) => f.servers);
+}

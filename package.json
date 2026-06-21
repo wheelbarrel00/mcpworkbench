@@ -1,0 +1,81 @@
+{
+  "name": "mcp-workbench",
+  "displayName": "MCP Workbench",
+  "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
+  "version": "0.1.0",
+  "publisher": "wheelbarrel00",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other",
+    "AI"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mcpWorkbench",
+          "title": "MCP Workbench",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mcpWorkbench": [
+        {
+          "id": "mcpWorkbench.servers",
+          "name": "Servers"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "mcpWorkbench.refresh",
+        "title": "MCP Workbench: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "mcpWorkbench.openConfig",
+        "title": "MCP Workbench: Open Config File"
+      },
+      {
+        "command": "mcpWorkbench.testServer",
+        "title": "MCP Workbench: Test Server"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "mcpWorkbench.refresh",
+          "when": "view == mcpWorkbench.servers",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "mcpWorkbench.openConfig",
+          "when": "viewItem == mcpServer"
+        },
+        {
+          "command": "mcpWorkbench.testServer",
+          "when": "viewItem == mcpServer"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "^1.125.0",
+    "typescript": "^5.9.3"
+  }
+}

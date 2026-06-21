@@ -1,0 +1,9 @@
+.vscode/**
+src/**
+**/*.map
+node_modules/**
+.gitignore
+.vscodeignore
+tsconfig.json
+package-lock.json
+CLAUDE.md
