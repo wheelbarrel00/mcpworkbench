@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/logo.png" alt="MCP Workbench" width="128" />
+  <img src="media/logo.png" alt="MCP Workbench" width="200" />
 </p>
 
 # MCP Workbench

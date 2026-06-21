@@ -1,6 +1,9 @@
 import * as vscode from "vscode";
+import * as os from "os";
 import { discoverAll } from "./discovery";
 import { DiscoveredServer, McpSource, ScannedFile } from "./types";
+
+const HOME = os.homedir();
 
 const SOURCE_LABELS: Record<McpSource, string> = {
   "cursor-global": "Cursor (global)",
@@ -78,7 +81,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
         `**${server.name}** · \`${server.transport.kind}\``,
         `Source: ${SOURCE_LABELS[server.source]}`,
         ...(server.scope ? [`Project: \`${server.scope}\``] : []),
-        `Config: \`${server.configPath}\``,
+        `Config: \`${homePath(server.configPath)}\``,
         ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${i.message}`),
       ].join("\n\n"),
     );
@@ -90,4 +93,8 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
 function projectName(scope: string): string {
   const parts = scope.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? scope;
+}
+
+function homePath(p: string): string {
+  return p.toLowerCase().startsWith(HOME.toLowerCase()) ? "~" + p.slice(HOME.length) : p;
 }
