@@ -68,7 +68,7 @@ export async function testServer(server: DiscoveredServer, timeoutMs = 20000): P
   }
 }
 
-function createTransport(server: DiscoveredServer) {
+export function createTransport(server: DiscoveredServer) {
   const t = server.transport;
   if (t.kind === "stdio") {
     if (!t.command.trim()) {
@@ -77,7 +77,7 @@ function createTransport(server: DiscoveredServer) {
     return new StdioClientTransport({
       command: t.command,
       args: t.args.map(expandEnv),
-      env: { ...inheritedEnv(), ...mapValues(t.env, expandEnv) },
+      env: mapValues(t.env, expandEnv),
       stderr: "pipe",
     });
   }
@@ -90,16 +90,6 @@ function createTransport(server: DiscoveredServer) {
 
 function expandEnv(value: string): string {
   return value.replace(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi, (whole, name: string) => process.env[name] ?? whole);
-}
-
-function inheritedEnv(): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (typeof v === "string") {
-      out[k] = v;
-    }
-  }
-  return out;
 }
 
 function mapValues(obj: Record<string, string>, fn: (value: string) => string): Record<string, string> {
