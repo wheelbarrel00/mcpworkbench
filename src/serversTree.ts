@@ -64,7 +64,6 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
       ].join("\n\n"),
     );
     item.contextValue = "mcpServer";
-    item.command = { command: "mcpWorkbench.testServer", title: "Test", arguments: [server] };
     return item;
   }
 }

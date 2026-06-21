@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="media/logo.png" alt="MCP Workbench" width="128" />
+</p>
+
 # MCP Workbench
 
 Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.
@@ -11,6 +15,7 @@ MCP server definitions end up scattered across half a dozen files with different
 - **Unified discovery** — one tree of every MCP server found across Cursor, VS Code, Claude Code, and Claude Desktop, grouped by source.
 - **Transport normalization** — `stdio`, `http`, and `sse` servers shown with a consistent shape regardless of which editor's field conventions the file used.
 - **Configuration validation** — surfaces the silent failures: wrong root key, unparseable JSON, `npx` without `-y`, and `${ENV}` references that aren't set in your environment.
+- **Connection testing** — launch any server over the MCP SDK, run the `initialize` handshake, and list its capabilities and tools (with input schemas) — or see the exact reason it failed to connect.
 - **Provenance at a glance** — every server shows which file and editor it came from, with the absolute config path one click away.
 - **Live refresh** — re-scans automatically when any known MCP config changes in your workspace.
 
@@ -67,10 +72,10 @@ Then reload Cursor and open the MCP Workbench panel from the activity bar.
 
 - **Refresh** — re-scan all locations from the view's title bar.
 - **Open Config File** — right-click a server to jump to the exact file it came from.
-- **Test Server** — right-click a server to connect and exercise it *(coming next; currently a stub)*.
+- **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, and tools — or the exact connection error.
 
 ## Roadmap
 
-- Connect to a server over the MCP SDK and run the `initialize` + `tools/list` handshake, then render tools and schemas in a webview with a live `tools/call`.
+- Fire a live `tools/call` from the test panel and render the result.
 - Parse per-project servers nested under `projects["<path>"].mcpServers` in `~/.claude.json`.
 - Opt-in support for VS Code user-profile `mcp.json` paths.

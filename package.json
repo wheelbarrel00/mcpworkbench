@@ -3,6 +3,7 @@
   "displayName": "MCP Workbench",
   "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
   "version": "0.1.0",
+  "icon": "media/logo.png",
   "publisher": "wheelbarrel00",
   "repository": {
     "type": "git",
@@ -49,7 +50,8 @@
       },
       {
         "command": "mcpWorkbench.testServer",
-        "title": "MCP Workbench: Test Server"
+        "title": "MCP Workbench: Test Server",
+        "icon": "$(play)"
       }
     ],
     "menus": {
@@ -62,6 +64,11 @@
       ],
       "view/item/context": [
         {
+          "command": "mcpWorkbench.testServer",
+          "when": "viewItem == mcpServer",
+          "group": "inline"
+        },
+        {
           "command": "mcpWorkbench.openConfig",
           "when": "viewItem == mcpServer"
         },
@@ -73,13 +80,20 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit -p ./",
+    "build": "node esbuild.js --production",
+    "vscode:prepublish": "npm run typecheck && npm run build",
+    "package": "npx @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
     "@types/vscode": "^1.90.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

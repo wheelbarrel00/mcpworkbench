@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { ServersProvider } from "./serversTree";
+import { showTester } from "./testPanel";
 import { DiscoveredServer } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
@@ -12,15 +13,17 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("mcpWorkbench.servers", provider),
     vscode.commands.registerCommand("mcpWorkbench.refresh", () => provider.refresh()),
-    vscode.commands.registerCommand("mcpWorkbench.openConfig", (server: DiscoveredServer) => {
+    vscode.commands.registerCommand("mcpWorkbench.openConfig", (arg: unknown) => {
+      const server = resolveServer(arg);
       if (server?.configPath) {
         vscode.window.showTextDocument(vscode.Uri.file(server.configPath));
       }
     }),
-    vscode.commands.registerCommand("mcpWorkbench.testServer", (server: DiscoveredServer) => {
-      vscode.window.showInformationMessage(
-        `Tester coming next: would connect to "${server?.name}" (${server?.transport.kind}).`,
-      );
+    vscode.commands.registerCommand("mcpWorkbench.testServer", (arg: unknown) => {
+      const server = resolveServer(arg);
+      if (server) {
+        void showTester(server);
+      }
     }),
   );
 
@@ -50,3 +53,14 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
+
+function resolveServer(arg: unknown): DiscoveredServer | undefined {
+  if (!arg || typeof arg !== "object") {
+    return undefined;
+  }
+  const node = arg as { server?: DiscoveredServer; transport?: unknown };
+  if (node.server) {
+    return node.server;
+  }
+  return node.transport ? (arg as DiscoveredServer) : undefined;
+}
