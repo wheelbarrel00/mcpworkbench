@@ -270,16 +270,25 @@ export function discoverAll(workspaceFolders: string[], options: DiscoverOptions
   const files: ScannedFile[] = [];
   for (const loc of LOCATIONS) {
     if (loc.scoped === "global") {
-      files.push(scanPath(loc, loc.resolve(), ctx));
+      const file = scanPath(loc, loc.resolve(), ctx);
+      assignProjectDir(file);
+      files.push(file);
     } else {
       for (const ws of workspaceFolders) {
         const file = scanPath(loc, loc.resolve(ws), ctx);
         file.workspaceFolder = ws;
+        assignProjectDir(file, ws);
         files.push(file);
       }
     }
   }
   return files;
+}
+
+function assignProjectDir(file: ScannedFile, workspaceFolder?: string): void {
+  for (const server of file.servers) {
+    server.projectDir = server.scope ?? workspaceFolder;
+  }
 }
 
 export function flattenServers(files: ScannedFile[]): DiscoveredServer[] {

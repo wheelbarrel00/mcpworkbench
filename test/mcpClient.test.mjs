@@ -34,7 +34,18 @@ await build({
   logLevel: "silent",
 });
 
-const { createTransport, testServer } = require(bundlePath);
+const { createTransport, testServer, openSession } = require(bundlePath);
+
+const echoServerPath = path.join(mkTemp("mcpwb-echo-"), "echo-server.cjs");
+await build({
+  entryPoints: [path.resolve("test/fixtures/echo-server.mjs")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  target: "node18",
+  outfile: echoServerPath,
+  logLevel: "silent",
+});
 
 function stdioServer(env) {
   return {
@@ -61,6 +72,41 @@ test("unrelated process.env secrets and PATH are not forwarded by us", () => {
   assert.equal("MCPWB_SECRET" in passed, false);
   assert.equal("PATH" in passed, false);
   assert.deepEqual(passed, {});
+});
+
+test("the spawned server cwd defaults to an existing project dir", () => {
+  const dir = mkTemp("mcpwb-proj-");
+  const transport = createTransport({ ...stdioServer({}), projectDir: dir });
+  assert.equal(transport._serverParams.cwd, dir);
+});
+
+test("a non-existent project dir is ignored, leaving cwd unset", () => {
+  const transport = createTransport({ ...stdioServer({}), projectDir: path.join(os.tmpdir(), "mcpwb-missing-zzz-99") });
+  assert.equal(transport._serverParams.cwd, undefined);
+});
+
+test("openSession lists tools and a live tools/call returns the result", { timeout: 15000 }, async () => {
+  const server = {
+    name: "echo",
+    transport: { kind: "stdio", command: process.execPath, args: [echoServerPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const opened = await openSession(server, 12000);
+  assert.equal(opened.ok, true);
+  try {
+    assert.ok(opened.session.info.tools.some((t) => t.name === "echo"));
+    const result = await opened.session.callTool("echo", { message: "hello world" });
+    assert.equal(result.ok, true);
+    assert.equal(result.isError, false);
+    const text = result.content.map((b) => (b && b.type === "text" ? b.text : "")).join("");
+    assert.match(text, /echo: hello world/);
+  } finally {
+    await opened.session.dispose();
+  }
 });
 
 test("a referenced env var that is not set fails with a clear error", async () => {

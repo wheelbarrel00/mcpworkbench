@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/logo.png" alt="MCP Workbench" width="200" />
+  <img src="media/logo.png" alt="MCP Workbench" width="320" />
 </p>
 
 # MCP Workbench
@@ -16,6 +16,7 @@ MCP server definitions end up scattered across half a dozen files with different
 - **Transport normalization** — `stdio`, `http`, and `sse` servers shown with a consistent shape regardless of which editor's field conventions the file used.
 - **Configuration validation** — surfaces the silent failures: wrong root key, unparseable JSON, `npx` without `-y`, and `${ENV}` references that aren't set in your environment.
 - **Connection testing** — launch any server over the MCP SDK, run the `initialize` handshake, and list its capabilities and tools (with input schemas) — or see the exact reason it failed to connect.
+- **Live tool calls** — fire a real `tools/call` from the panel with arguments pre-filled from each tool's schema, and see the result rendered inline.
 - **Provenance at a glance** — every server shows which file and editor it came from, with the absolute config path one click away.
 - **Live refresh** — re-scans automatically when any known MCP config changes in your workspace.
 
@@ -67,7 +68,7 @@ Open the folder in VS Code or Cursor and press **F5** to launch an Extension Dev
 
 ```bash
 npx @vscode/vsce package
-cursor --install-extension mcp-workbench-0.1.0.vsix
+cursor --install-extension mcp-workbench-0.2.0.vsix
 ```
 
 Then reload Cursor and open the MCP Workbench panel from the activity bar.
@@ -76,11 +77,10 @@ Then reload Cursor and open the MCP Workbench panel from the activity bar.
 
 - **Refresh** — re-scan all locations from the view's title bar.
 - **Open Config File** — right-click a server to jump to the exact file it came from.
-- **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, and tools — or the exact connection error.
+- **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, and tools — or the exact connection error. The panel stays connected while open: edit a tool's JSON arguments and click **Call tool** to run it live, then close the panel to disconnect.
 
 ## Roadmap
 
-- Fire a live `tools/call` from the test panel and render the result.
 - Opt-in support for VS Code user-profile `mcp.json` paths.
 
 ## License

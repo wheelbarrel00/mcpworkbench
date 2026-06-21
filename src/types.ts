@@ -24,6 +24,7 @@ export interface DiscoveredServer {
   configPath: string;
   rootKey: "servers" | "mcpServers";
   scope?: string;
+  projectDir?: string;
   raw: unknown;
   issues: ConfigIssue[];
 }

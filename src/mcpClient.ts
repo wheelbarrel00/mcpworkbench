@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -5,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.1.0";
+const CLIENT_VERSION = "0.2.0";
 
 export interface ToolSummary {
   name: string;
@@ -29,7 +30,30 @@ export interface TestFailure {
 
 export type TestResult = TestSuccess | TestFailure;
 
-export async function testServer(server: DiscoveredServer, timeoutMs = 20000): Promise<TestResult> {
+export interface ToolCallSuccess {
+  ok: true;
+  isError: boolean;
+  content: unknown[];
+  structuredContent?: unknown;
+}
+
+export interface ToolCallFailure {
+  ok: false;
+  error: string;
+  detail?: string;
+}
+
+export type ToolCallResult = ToolCallSuccess | ToolCallFailure;
+
+export interface McpSession {
+  info: TestSuccess;
+  callTool(name: string, args: unknown): Promise<ToolCallResult>;
+  dispose(): Promise<void>;
+}
+
+export type SessionResult = { ok: true; session: McpSession } | TestFailure;
+
+export async function openSession(server: DiscoveredServer, timeoutMs = 20000): Promise<SessionResult> {
   let transport;
   try {
     transport = createTransport(server);
@@ -52,19 +76,56 @@ export async function testServer(server: DiscoveredServer, timeoutMs = 20000): P
       ? (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary)
       : [];
     const serverInfo = client.getServerVersion();
-    return {
+    const info: TestSuccess = {
       ok: true,
       serverInfo: serverInfo ? { name: serverInfo.name, version: serverInfo.version } : undefined,
       instructions: client.getInstructions(),
       capabilities,
       tools,
     };
+    const session: McpSession = {
+      info,
+      async callTool(name, args) {
+        try {
+          const res = await client.callTool(
+            { name, arguments: (args ?? {}) as Record<string, unknown> },
+            undefined,
+            { timeout: timeoutMs },
+          );
+          return {
+            ok: true,
+            isError: res.isError === true,
+            content: Array.isArray(res.content) ? res.content : [],
+            structuredContent: res.structuredContent,
+          };
+        } catch (e) {
+          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+        }
+      },
+      async dispose() {
+        try {
+          await client.close();
+        } catch {}
+      },
+    };
+    return { ok: true, session };
   } catch (e) {
-    return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
-  } finally {
     try {
       await client.close();
     } catch {}
+    return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+  }
+}
+
+export async function testServer(server: DiscoveredServer, timeoutMs = 20000): Promise<TestResult> {
+  const opened = await openSession(server, timeoutMs);
+  if (!opened.ok) {
+    return opened;
+  }
+  try {
+    return opened.session.info;
+  } finally {
+    await opened.session.dispose();
   }
 }
 
@@ -78,6 +139,7 @@ export function createTransport(server: DiscoveredServer) {
       command: t.command,
       args: t.args.map(expandEnv),
       env: mapValues(t.env, expandEnv),
+      cwd: resolveCwd(server.projectDir),
       stderr: "pipe",
     });
   }
@@ -86,6 +148,17 @@ export function createTransport(server: DiscoveredServer) {
   return t.kind === "sse"
     ? new SSEClientTransport(url, { requestInit })
     : new StreamableHTTPClientTransport(url, { requestInit });
+}
+
+function resolveCwd(dir: string | undefined): string | undefined {
+  if (!dir) {
+    return undefined;
+  }
+  try {
+    return fs.statSync(dir).isDirectory() ? dir : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function expandEnv(value: string): string {

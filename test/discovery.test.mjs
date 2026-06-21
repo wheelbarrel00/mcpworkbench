@@ -142,6 +142,8 @@ test("multi-root folders stay separate, each attributed to its workspace", () =>
   assert.ok(a && b);
   assert.deepEqual(a.servers.map((s) => s.name), ["alpha"]);
   assert.deepEqual(b.servers.map((s) => s.name), ["beta"]);
+  assert.equal(a.servers[0].projectDir, wsA);
+  assert.equal(b.servers[0].projectDir, wsB);
 });
 
 test("an empty mcpServers object is flagged as empty-root-key, not missing", () => {
@@ -196,6 +198,7 @@ test("claude-code-user projects filter to the open workspace unless showAll is s
   try {
     const filtered = discoverAll([wsMatch]).find((f) => f.source === "claude-code-user");
     assert.deepEqual(filtered.servers.map((s) => s.name), ["inside"]);
+    assert.equal(filtered.servers[0].projectDir, wsMatch);
 
     const all = discoverAll([wsMatch], { showAllClaudeProjects: true }).find((f) => f.source === "claude-code-user");
     assert.deepEqual(all.servers.map((s) => s.name).sort(), ["inside", "outside"]);

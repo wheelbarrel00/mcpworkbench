@@ -4,6 +4,17 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-21
+
+### Added
+
+- Call tools live from the Test Server panel: each tool gets a JSON arguments box pre-filled from its input schema and a button that runs a real `tools/call` against the connected server, rendering the result inline (text, structured content, and labels for image, audio, and resource blocks).
+- Spawned stdio servers now default their working directory to the server's project or workspace folder, so tools that resolve paths relative to the working directory behave as they do in the host editor.
+
+### Changed
+
+- The Test Server panel keeps one MCP session connected while it is open and reuses it for tool calls; closing the panel disconnects the server.
+
 ## [0.1.0] - 2026-06-21
 
 Initial release.
