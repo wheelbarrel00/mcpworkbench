@@ -31,6 +31,7 @@ export interface DiscoveredServer {
 export interface ScannedFile {
   path: string;
   source: McpSource;
+  workspaceFolder?: string;
   exists: boolean;
   fileIssues: ConfigIssue[];
   servers: DiscoveredServer[];

@@ -127,6 +127,23 @@ test("a leading UTF-8 BOM does not make the whole file vanish", () => {
   assert.equal(file.servers[0].name, "fs");
 });
 
+test("multi-root folders stay separate, each attributed to its workspace", () => {
+  const wsA = mkTemp("mcpwb-wsA-");
+  const wsB = mkTemp("mcpwb-wsB-");
+  for (const [ws, name] of [[wsA, "alpha"], [wsB, "beta"]]) {
+    const file = path.join(ws, ".cursor", "mcp.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: { [name]: { command: "node" } } }));
+  }
+  const cursorFiles = discoverAll([wsA, wsB]).filter((f) => f.source === "cursor-workspace" && f.exists);
+  assert.equal(cursorFiles.length, 2);
+  const a = cursorFiles.find((f) => f.workspaceFolder === wsA);
+  const b = cursorFiles.find((f) => f.workspaceFolder === wsB);
+  assert.ok(a && b);
+  assert.deepEqual(a.servers.map((s) => s.name), ["alpha"]);
+  assert.deepEqual(b.servers.map((s) => s.name), ["beta"]);
+});
+
 test("malformed JSON is still reported as bad-json", () => {
   const file = scanCursorWorkspace(`{ "mcpServers": { "fs": { "command": } } }`);
   assert.ok(file);

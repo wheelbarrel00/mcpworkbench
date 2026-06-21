@@ -200,7 +200,9 @@ export function discoverAll(workspaceFolders: string[]): ScannedFile[] {
       files.push(scanPath(loc, loc.resolve()));
     } else {
       for (const ws of workspaceFolders) {
-        files.push(scanPath(loc, loc.resolve(ws)));
+        const file = scanPath(loc, loc.resolve(ws));
+        file.workspaceFolder = ws;
+        files.push(file);
       }
     }
   }

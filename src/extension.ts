@@ -1,9 +1,18 @@
 import * as vscode from "vscode";
+import * as os from "os";
+import * as path from "path";
 import { ServersProvider } from "./serversTree";
 import { showTester } from "./testPanel";
 import { DiscoveredServer } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
+
+const HOME = os.homedir();
+const GLOBAL_WATCH_TARGETS: Array<{ dir: string; file: string }> = [
+  { dir: HOME, file: ".claude.json" },
+  { dir: path.join(HOME, ".cursor"), file: "mcp.json" },
+  { dir: path.join(HOME, ".claude"), file: "claude_desktop_config.json" },
+];
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("[MCP Workbench] activated");
@@ -47,6 +56,14 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     { dispose: () => watcher?.dispose() },
   );
+
+  for (const { dir, file } of GLOBAL_WATCH_TARGETS) {
+    const globalWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dir, file));
+    globalWatcher.onDidChange(() => provider.refresh());
+    globalWatcher.onDidCreate(() => provider.refresh());
+    globalWatcher.onDidDelete(() => provider.refresh());
+    context.subscriptions.push(globalWatcher);
+  }
 
   syncWatcher();
   provider.refresh();
