@@ -12,7 +12,7 @@ export type McpSource =
   | "claude-desktop";
 
 export interface ConfigIssue {
-  level: "error" | "warning";
+  level: "error" | "warning" | "info";
   code: string;
   message: string;
 }

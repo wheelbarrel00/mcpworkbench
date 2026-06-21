@@ -89,7 +89,13 @@ export function createTransport(server: DiscoveredServer) {
 }
 
 function expandEnv(value: string): string {
-  return value.replace(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi, (whole, name: string) => process.env[name] ?? whole);
+  return value.replace(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi, (_whole, name: string) => {
+    const resolved = process.env[name];
+    if (resolved === undefined) {
+      throw new Error(`Environment variable ${name} is referenced but not set.`);
+    }
+    return resolved;
+  });
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {

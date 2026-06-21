@@ -22,16 +22,23 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("mcpWorkbench.servers", provider),
     vscode.commands.registerCommand("mcpWorkbench.refresh", () => provider.refresh()),
-    vscode.commands.registerCommand("mcpWorkbench.openConfig", (arg: unknown) => {
+    vscode.commands.registerCommand("mcpWorkbench.openConfig", async (arg: unknown) => {
       const server = resolveServer(arg);
-      if (server?.configPath) {
-        vscode.window.showTextDocument(vscode.Uri.file(server.configPath));
+      if (!server?.configPath) {
+        return;
+      }
+      try {
+        await vscode.window.showTextDocument(vscode.Uri.file(server.configPath));
+      } catch (e) {
+        vscode.window.showErrorMessage(`MCP Workbench: could not open ${server.configPath}: ${errorText(e)}`);
       }
     }),
     vscode.commands.registerCommand("mcpWorkbench.testServer", (arg: unknown) => {
       const server = resolveServer(arg);
       if (server) {
-        void showTester(server);
+        showTester(server).catch((e) =>
+          vscode.window.showErrorMessage(`MCP Workbench: could not open the tester: ${errorText(e)}`),
+        );
       }
     }),
   );
@@ -65,11 +72,23 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(globalWatcher);
   }
 
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("mcpWorkbench")) {
+        provider.refresh();
+      }
+    }),
+  );
+
   syncWatcher();
   provider.refresh();
 }
 
 export function deactivate() {}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 function resolveServer(arg: unknown): DiscoveredServer | undefined {
   if (!arg || typeof arg !== "object") {

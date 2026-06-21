@@ -63,6 +63,22 @@ test("unrelated process.env secrets and PATH are not forwarded by us", () => {
   assert.deepEqual(passed, {});
 });
 
+test("a referenced env var that is not set fails with a clear error", async () => {
+  delete process.env.MCPWB_MISSING_HEADER;
+  const server = {
+    name: "needs-token",
+    transport: { kind: "http", url: "http://127.0.0.1:1/never", headers: { Authorization: "Bearer ${MCPWB_MISSING_HEADER}" } },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /MCPWB_MISSING_HEADER/);
+});
+
 test("an SSE server that never sends endpoint times out instead of hanging", { timeout: 5000 }, async () => {
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });

@@ -65,8 +65,8 @@ function normalizeTransport(entry: any): {
   const issues: ConfigIssue[] = [];
 
   if (typeof entry?.command === "string") {
-    const args: string[] = Array.isArray(entry.args) ? entry.args.map(String) : [];
-    const env: Record<string, string> = entry.env && typeof entry.env === "object" ? entry.env : {};
+    const args = stringArgs(entry.args, issues);
+    const env = stringRecord(entry.env, "env var", issues);
 
     if (!entry.command.trim()) {
       issues.push({ level: "error", code: "empty-command", message: "stdio server has an empty command." });
@@ -83,7 +83,7 @@ function normalizeTransport(entry: any): {
   }
 
   if (typeof entry?.url === "string") {
-    const headers: Record<string, string> = entry.headers && typeof entry.headers === "object" ? entry.headers : {};
+    const headers = stringRecord(entry.headers, "header", issues);
     const t = String(entry.type ?? "").toLowerCase();
     const kind: "http" | "sse" = t === "sse" ? "sse" : "http";
     issues.push(...missingEnvIssues(headers));
@@ -100,11 +100,12 @@ function normalizeTransport(entry: any): {
 
 function missingEnvIssues(obj: Record<string, string>): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
+  const seen = new Set<string>();
   for (const value of Object.values(obj)) {
-    if (typeof value !== "string") continue;
     for (const m of value.matchAll(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi)) {
       const name = m[1];
-      if (process.env[name] === undefined) {
+      if (process.env[name] === undefined && !seen.has(name)) {
+        seen.add(name);
         issues.push({
           level: "warning",
           code: "env-unset",
@@ -116,7 +117,41 @@ function missingEnvIssues(obj: Record<string, string>): ConfigIssue[] {
   return issues;
 }
 
-function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
+function stringArgs(value: unknown, issues: ConfigIssue[]): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  value.forEach((item, i) => {
+    if (typeof item === "string") {
+      out.push(item);
+    } else {
+      issues.push({ level: "warning", code: "non-string-arg", message: `args[${i}] is not a string and was ignored.` });
+    }
+  });
+  return out;
+}
+
+function stringRecord(value: unknown, label: string, issues: ConfigIssue[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!isPlainObject(value)) return out;
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") {
+      out[key] = item;
+    } else {
+      issues.push({ level: "warning", code: "non-string-value", message: `${label} "${key}" is not a string and was ignored.` });
+    }
+  }
+  return out;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizePath(p: string): string {
+  return p.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
+function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext): ScannedFile {
   const result: ScannedFile = {
     path: p ?? "(unresolved)",
     source: loc.source,
@@ -139,10 +174,23 @@ function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
     return result;
   }
 
-  const blocks = collectBlocks(loc, parsed);
+  const blocks = collectBlocks(loc, parsed, ctx);
+  const mainPresent = isPlainObject(parsed?.[loc.rootKey]);
+  const hasProjects = !!loc.includeProjects && isPlainObject(parsed?.projects);
+
   if (blocks.length === 0) {
+    if (hasProjects) {
+      if (!ctx.showAllClaudeProjects) {
+        result.fileIssues.push({
+          level: "info",
+          code: "projects-filtered",
+          message: `No servers recorded for this workspace. Enable "MCP Workbench: Show All Claude Projects" to list servers from your other projects.`,
+        });
+      }
+      return result;
+    }
     const otherKey = loc.rootKey === "servers" ? "mcpServers" : "servers";
-    const hint = parsed?.[otherKey]
+    const hint = isPlainObject(parsed?.[otherKey])
       ? ` Found "${otherKey}" instead — this editor expects "${loc.rootKey}".`
       : "";
     result.fileIssues.push({
@@ -153,8 +201,10 @@ function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
     return result;
   }
 
+  let total = 0;
   for (const { entries, scope } of blocks) {
     for (const [name, entry] of Object.entries(entries)) {
+      total++;
       const { transport, issues } = normalizeTransport(entry);
       result.servers.push({
         name,
@@ -168,6 +218,14 @@ function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
       });
     }
   }
+
+  if (total === 0 && mainPresent) {
+    result.fileIssues.push({
+      level: "warning",
+      code: "empty-root-key",
+      message: `"${loc.rootKey}" is present but defines no servers.`,
+    });
+  }
   return result;
 }
 
@@ -176,31 +234,46 @@ interface ServerBlock {
   scope?: string;
 }
 
-function collectBlocks(loc: ConfigLocation, parsed: any): ServerBlock[] {
+function collectBlocks(loc: ConfigLocation, parsed: any, ctx: ScanContext): ServerBlock[] {
   const blocks: ServerBlock[] = [];
-  const main = parsed?.[loc.rootKey];
-  if (main && typeof main === "object") {
-    blocks.push({ entries: main });
+  if (isPlainObject(parsed?.[loc.rootKey])) {
+    blocks.push({ entries: parsed[loc.rootKey] });
   }
-  if (loc.includeProjects && parsed?.projects && typeof parsed.projects === "object") {
+  if (loc.includeProjects && isPlainObject(parsed?.projects)) {
+    const folders = new Set(ctx.workspaceFolders.map(normalizePath));
     for (const [projectPath, projectConfig] of Object.entries<any>(parsed.projects)) {
-      const projectServers = projectConfig?.mcpServers;
-      if (projectServers && typeof projectServers === "object") {
-        blocks.push({ entries: projectServers, scope: projectPath });
+      if (!ctx.showAllClaudeProjects && !folders.has(normalizePath(projectPath))) {
+        continue;
+      }
+      if (isPlainObject(projectConfig?.mcpServers)) {
+        blocks.push({ entries: projectConfig.mcpServers, scope: projectPath });
       }
     }
   }
   return blocks;
 }
 
-export function discoverAll(workspaceFolders: string[]): ScannedFile[] {
+export interface DiscoverOptions {
+  showAllClaudeProjects?: boolean;
+}
+
+interface ScanContext {
+  workspaceFolders: string[];
+  showAllClaudeProjects: boolean;
+}
+
+export function discoverAll(workspaceFolders: string[], options: DiscoverOptions = {}): ScannedFile[] {
+  const ctx: ScanContext = {
+    workspaceFolders,
+    showAllClaudeProjects: options.showAllClaudeProjects ?? false,
+  };
   const files: ScannedFile[] = [];
   for (const loc of LOCATIONS) {
     if (loc.scoped === "global") {
-      files.push(scanPath(loc, loc.resolve()));
+      files.push(scanPath(loc, loc.resolve(), ctx));
     } else {
       for (const ws of workspaceFolders) {
-        const file = scanPath(loc, loc.resolve(ws));
+        const file = scanPath(loc, loc.resolve(ws), ctx);
         file.workspaceFolder = ws;
         files.push(file);
       }

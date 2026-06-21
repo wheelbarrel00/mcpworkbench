@@ -26,7 +26,10 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
 
   refresh(): void {
     const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
-    this.files = discoverAll(folders);
+    const showAllClaudeProjects = vscode.workspace
+      .getConfiguration("mcpWorkbench")
+      .get<boolean>("showAllClaudeProjects", false);
+    this.files = discoverAll(folders, { showAllClaudeProjects });
     this._onDidChange.fire();
   }
 
@@ -92,11 +95,11 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     item.iconPath = new vscode.ThemeIcon(errors ? "error" : warnings ? "warning" : "pass");
     item.tooltip = new vscode.MarkdownString(
       [
-        `**${server.name}** · \`${server.transport.kind}\``,
-        `Source: ${SOURCE_LABELS[server.source]}`,
-        ...(server.scope ? [`Project: \`${server.scope}\``] : []),
-        `Config: \`${homePath(server.configPath)}\``,
-        ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${i.message}`),
+        `**${mdText(server.name)}** · \`${server.transport.kind}\``,
+        `Source: ${mdText(SOURCE_LABELS[server.source])}`,
+        ...(server.scope ? [`Project: \`${mdCode(server.scope)}\``] : []),
+        `Config: \`${mdCode(homePath(server.configPath))}\``,
+        ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${mdText(i.message)}`),
       ].join("\n\n"),
     );
     item.contextValue = "mcpServer";
@@ -119,5 +122,22 @@ function baseName(p: string): string {
 }
 
 function homePath(p: string): string {
-  return p.toLowerCase().startsWith(HOME.toLowerCase()) ? "~" + p.slice(HOME.length) : p;
+  if (p.toLowerCase() === HOME.toLowerCase()) {
+    return "~";
+  }
+  if (p.toLowerCase().startsWith(HOME.toLowerCase())) {
+    const next = p[HOME.length];
+    if (next === "/" || next === "\\") {
+      return "~" + p.slice(HOME.length);
+    }
+  }
+  return p;
+}
+
+function mdText(s: string): string {
+  return s.replace(/[\\`*_{}\[\]<>()#+\-.!|~]/g, "\\$&");
+}
+
+function mdCode(s: string): string {
+  return s.replace(/`/g, "'");
 }

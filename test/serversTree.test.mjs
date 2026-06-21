@@ -100,3 +100,32 @@ test("single-root keeps the plain source label", () => {
   assert.equal(sources.length, 1);
   assert.equal(sources[0].label, "Cursor (workspace)");
 });
+
+function serverTooltip(configPath, name = "s") {
+  const p = providerFor([]);
+  const item = p.getTreeItem({
+    kind: "server",
+    id: "x",
+    server: {
+      name,
+      transport: { kind: "stdio", command: "node", args: [], env: {} },
+      source: "cursor-workspace",
+      configPath,
+      scope: undefined,
+      issues: [],
+    },
+  });
+  return item.tooltip.value;
+}
+
+test("homePath collapses real subdirs but not sibling dirs", () => {
+  const home = process.env.USERPROFILE;
+  assert.match(serverTooltip(path.join(home, "sub", "mcp.json")), /Config: `~/);
+  assert.doesNotMatch(serverTooltip(home + "X" + path.sep + "mcp.json"), /Config: `~/);
+});
+
+test("backticks and markdown metacharacters in a server name are escaped in the tooltip", () => {
+  const value = serverTooltip(path.join(process.env.USERPROFILE, "mcp.json"), "weird`*_name");
+  assert.ok(value.includes("weird\\`"), "backtick should be backslash-escaped");
+  assert.ok(value.includes("\\*"), "asterisk should be backslash-escaped");
+});

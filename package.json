@@ -55,6 +55,16 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "mcpWorkbench.testServer",
+          "when": "false"
+        },
+        {
+          "command": "mcpWorkbench.openConfig",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "mcpWorkbench.refresh",
@@ -71,12 +81,18 @@
         {
           "command": "mcpWorkbench.openConfig",
           "when": "viewItem == mcpServer"
-        },
-        {
-          "command": "mcpWorkbench.testServer",
-          "when": "viewItem == mcpServer"
         }
       ]
+    },
+    "configuration": {
+      "title": "MCP Workbench",
+      "properties": {
+        "mcpWorkbench.showAllClaudeProjects": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show MCP servers from every project recorded in ~/.claude.json, not just the project that matches an open workspace folder."
+        }
+      }
     }
   },
   "scripts": {

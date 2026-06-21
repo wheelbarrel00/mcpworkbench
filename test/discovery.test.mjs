@@ -144,6 +144,66 @@ test("multi-root folders stay separate, each attributed to its workspace", () =>
   assert.deepEqual(b.servers.map((s) => s.name), ["beta"]);
 });
 
+test("an empty mcpServers object is flagged as empty-root-key, not missing", () => {
+  const file = scanCursorWorkspace(JSON.stringify({ mcpServers: {} }));
+  assert.ok(file);
+  assert.equal(file.servers.length, 0);
+  assert.equal(hasIssue(file.fileIssues, "empty-root-key"), true);
+  assert.equal(hasIssue(file.fileIssues, "missing-root-key"), false);
+});
+
+test("an array mcpServers does not produce servers named 0,1", () => {
+  const file = scanCursorWorkspace(JSON.stringify({ mcpServers: [{ command: "node" }] }));
+  assert.ok(file);
+  assert.equal(file.servers.length, 0);
+  assert.equal(hasIssue(file.fileIssues, "missing-root-key"), true);
+});
+
+test("non-string args and env values are dropped and flagged", () => {
+  const file = scanCursorWorkspace(
+    JSON.stringify({ mcpServers: { x: { command: "node", args: ["ok", 42, null], env: { A: "s", B: 5 } } } })
+  );
+  const server = file.servers[0];
+  assert.deepEqual(server.transport.args, ["ok"]);
+  assert.deepEqual(server.transport.env, { A: "s" });
+  assert.equal(server.issues.some((i) => i.code === "non-string-arg"), true);
+  assert.equal(server.issues.some((i) => i.code === "non-string-value"), true);
+});
+
+test("a repeated unset env var reference is only flagged once", () => {
+  delete process.env.MCPWB_DEFINITELY_UNSET;
+  const file = scanCursorWorkspace(
+    JSON.stringify({
+      mcpServers: { x: { url: "http://localhost", headers: { a: "${MCPWB_DEFINITELY_UNSET} ${MCPWB_DEFINITELY_UNSET}" } } },
+    })
+  );
+  const unset = file.servers[0].issues.filter((i) => i.code === "env-unset");
+  assert.equal(unset.length, 1);
+});
+
+test("claude-code-user projects filter to the open workspace unless showAll is set", () => {
+  const claudeJson = path.join(process.env.USERPROFILE, ".claude.json");
+  const wsMatch = mkTemp("mcpwb-proj-");
+  fs.writeFileSync(
+    claudeJson,
+    JSON.stringify({
+      projects: {
+        [wsMatch]: { mcpServers: { inside: { command: "node" } } },
+        "C:/elsewhere/other-project": { mcpServers: { outside: { command: "node" } } },
+      },
+    })
+  );
+  try {
+    const filtered = discoverAll([wsMatch]).find((f) => f.source === "claude-code-user");
+    assert.deepEqual(filtered.servers.map((s) => s.name), ["inside"]);
+
+    const all = discoverAll([wsMatch], { showAllClaudeProjects: true }).find((f) => f.source === "claude-code-user");
+    assert.deepEqual(all.servers.map((s) => s.name).sort(), ["inside", "outside"]);
+  } finally {
+    fs.rmSync(claudeJson, { force: true });
+  }
+});
+
 test("malformed JSON is still reported as bad-json", () => {
   const file = scanCursorWorkspace(`{ "mcpServers": { "fs": { "command": } } }`);
   assert.ok(file);
