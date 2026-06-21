@@ -4,6 +4,12 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-21
+
+### Fixed
+
+- The logo background is now transparent, removing the white box that appeared around the icon on dark backgrounds (GitHub, the Marketplace, and Open VSX).
+
 ## [0.2.1] - 2026-06-21
 
 ### Changed
