@@ -46,7 +46,7 @@ export async function testServer(server: DiscoveredServer, timeoutMs = 20000): P
         stderr += chunk.toString();
       });
     }
-    await connecting;
+    await withTimeout(connecting, timeoutMs, `Timed out after ${Math.round(timeoutMs / 1000)}s while connecting to the server.`);
     const capabilities = client.getServerCapabilities();
     const tools = capabilities?.tools
       ? (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary)
@@ -90,6 +90,14 @@ export function createTransport(server: DiscoveredServer) {
 
 function expandEnv(value: string): string {
   return value.replace(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi, (whole, name: string) => process.env[name] ?? whole);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function mapValues(obj: Record<string, string>, fn: (value: string) => string): Record<string, string> {

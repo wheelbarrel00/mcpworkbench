@@ -3,7 +3,7 @@ import { DiscoveredServer } from "./types";
 import { testServer, TestResult, TestSuccess, ToolSummary } from "./mcpClient";
 
 let panel: vscode.WebviewPanel | undefined;
-let activeServer: DiscoveredServer | undefined;
+let seq = 0;
 
 export async function showTester(server: DiscoveredServer): Promise<void> {
   if (!panel) {
@@ -15,17 +15,16 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
     );
     panel.onDidDispose(() => {
       panel = undefined;
-      activeServer = undefined;
     });
   }
 
-  activeServer = server;
+  const myId = ++seq;
   panel.title = `Test: ${server.name}`;
   panel.reveal(vscode.ViewColumn.Active);
   panel.webview.html = page(server, header(server, `<p class="status">Connecting…</p>`));
 
   const result = await testServer(server);
-  if (!panel || activeServer !== server) {
+  if (!panel || myId !== seq) {
     return;
   }
   panel.webview.html = page(server, body(server, result));
