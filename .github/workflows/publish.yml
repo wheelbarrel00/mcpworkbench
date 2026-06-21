@@ -1,0 +1,86 @@
+name: Publish Extension
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package VSIX
+        run: npx --yes @vscode/vsce package --out extension.vsix
+
+      - name: Publish to Open VSX (skip if version already published)
+        if: env.OVSX_PAT != ''
+        run: |
+          set +e
+          OUT=$(npx --yes ovsx publish extension.vsix -p "$OVSX_PAT" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ $CODE -ne 0 ]; then
+            if echo "$OUT" | grep -qiE "already (exists|published)|is already|same version"; then
+              echo "::notice title=Open VSX::Version already published - skipping."
+              exit 0
+            fi
+            echo "::error title=Open VSX::Publish failed for a reason other than a duplicate version."
+            exit $CODE
+          fi
+          echo "Published to Open VSX."
+
+      - name: Publish to VS Code Marketplace (skip if version already published)
+        if: env.VSCE_PAT != ''
+        run: |
+          set +e
+          OUT=$(npx --yes @vscode/vsce publish --packagePath extension.vsix -p "$VSCE_PAT" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          if [ $CODE -ne 0 ]; then
+            if echo "$OUT" | grep -qiE "already (exists|published)|same version|already a version|conflict|409"; then
+              echo "::notice title=VS Code Marketplace::Version already published - skipping."
+              exit 0
+            fi
+            echo "::error title=VS Code Marketplace::Publish failed for a reason other than a duplicate version."
+            exit $CODE
+          fi
+          echo "Published to VS Code Marketplace."
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice title=GitHub Release::$TAG already exists - skipping."
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          VSIX="mcp-workbench-${VERSION}.vsix"
+          cp extension.vsix "$VSIX"
+          awk -v hdr="## [$VERSION]" 'index($0, hdr)==1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+            gh release create "$TAG" "$VSIX" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" "$VSIX" --title "$TAG" --generate-notes
+          fi
+          echo "Created GitHub Release $TAG."
