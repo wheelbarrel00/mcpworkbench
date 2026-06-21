@@ -1,7 +1,9 @@
 .vscode/**
 .cursor/**
 .mcp.json
+.handoff/**
 src/**
+test/**
 **/*.map
 node_modules/**
 .gitignore

@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { parse as parseJsonc, printParseErrorCode } from "jsonc-parser";
+import type { ParseError } from "jsonc-parser";
 import {
   ConfigIssue,
   DiscoveredServer,
@@ -37,12 +39,23 @@ const LOCATIONS: ConfigLocation[] = [
     resolve: () => path.join(home, ".claude", "claude_desktop_config.json") },
 ];
 
+const BYTE_ORDER_MARK = 0xfeff;
+
 function parseLoose(text: string): unknown {
-  const noComments = text
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:"'])\/\/.*$/gm, "$1");
-  const noTrailingCommas = noComments.replace(/,(\s*[}\]])/g, "$1");
-  return JSON.parse(noTrailingCommas);
+  const source = text.charCodeAt(0) === BYTE_ORDER_MARK ? text.slice(1) : text;
+  const errors: ParseError[] = [];
+  const value = parseJsonc(source, errors, { allowTrailingComma: true });
+  if (errors.length > 0) {
+    throw new Error(describeParseError(source, errors[0]));
+  }
+  return value;
+}
+
+function describeParseError(text: string, error: ParseError): string {
+  const before = text.slice(0, error.offset);
+  const line = before.split("\n").length;
+  const column = error.offset - before.lastIndexOf("\n");
+  return `${printParseErrorCode(error.error)} at line ${line}, column ${column}`;
 }
 
 function normalizeTransport(entry: any): {

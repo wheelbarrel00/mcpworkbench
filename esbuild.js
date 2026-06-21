@@ -12,6 +12,9 @@ async function main() {
     target: "node18",
     outfile: "dist/extension.js",
     external: ["vscode"],
+    alias: {
+      "jsonc-parser": require.resolve("jsonc-parser/lib/esm/main.js"),
+    },
     sourcemap: !production,
     minify: production,
     logLevel: "info",

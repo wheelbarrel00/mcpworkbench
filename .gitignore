@@ -8,3 +8,5 @@ Thumbs.db
 .cursor/
 .vscode/mcp.json
 .mcp.json
+
+.handoff/

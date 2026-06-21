@@ -83,6 +83,7 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit -p ./",
+    "test": "node --test \"test/**/*.test.mjs\"",
     "build": "node esbuild.js --production",
     "vscode:prepublish": "npm run typecheck && npm run build",
     "package": "npx @vscode/vsce package"
@@ -94,6 +95,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "jsonc-parser": "^3.3.1"
   }
 }
