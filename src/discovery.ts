@@ -14,6 +14,7 @@ interface ConfigLocation {
   rootKey: "servers" | "mcpServers";
   resolve: (workspaceFolder?: string) => string | undefined;
   scoped: "global" | "workspace";
+  includeProjects?: boolean;
 }
 
 const home = os.homedir();
@@ -29,7 +30,7 @@ const LOCATIONS: ConfigLocation[] = [
 
   { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace",
     resolve: (ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
-  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global",
+  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true,
     resolve: () => path.join(home, ".claude.json") },
 
   { source: "claude-desktop", rootKey: "mcpServers", scoped: "global",
@@ -125,8 +126,8 @@ function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
     return result;
   }
 
-  const block = parsed?.[loc.rootKey];
-  if (!block || typeof block !== "object") {
+  const blocks = collectBlocks(loc, parsed);
+  if (blocks.length === 0) {
     const otherKey = loc.rootKey === "servers" ? "mcpServers" : "servers";
     const hint = parsed?.[otherKey]
       ? ` Found "${otherKey}" instead — this editor expects "${loc.rootKey}".`
@@ -139,19 +140,44 @@ function scanPath(loc: ConfigLocation, p: string | undefined): ScannedFile {
     return result;
   }
 
-  for (const [name, entry] of Object.entries<any>(block)) {
-    const { transport, issues } = normalizeTransport(entry);
-    if (!transport) {
+  for (const { entries, scope } of blocks) {
+    for (const [name, entry] of Object.entries(entries)) {
+      const { transport, issues } = normalizeTransport(entry);
       result.servers.push({
-        name, source: loc.source, configPath: p, rootKey: loc.rootKey,
-        raw: entry, issues,
-        transport: { kind: "stdio", command: "", args: [], env: {} },
+        name,
+        transport: transport ?? { kind: "stdio", command: "", args: [], env: {} },
+        source: loc.source,
+        configPath: p,
+        rootKey: loc.rootKey,
+        scope,
+        raw: entry,
+        issues,
       });
-      continue;
     }
-    result.servers.push({ name, transport, source: loc.source, configPath: p, rootKey: loc.rootKey, raw: entry, issues });
   }
   return result;
+}
+
+interface ServerBlock {
+  entries: Record<string, unknown>;
+  scope?: string;
+}
+
+function collectBlocks(loc: ConfigLocation, parsed: any): ServerBlock[] {
+  const blocks: ServerBlock[] = [];
+  const main = parsed?.[loc.rootKey];
+  if (main && typeof main === "object") {
+    blocks.push({ entries: main });
+  }
+  if (loc.includeProjects && parsed?.projects && typeof parsed.projects === "object") {
+    for (const [projectPath, projectConfig] of Object.entries<any>(parsed.projects)) {
+      const projectServers = projectConfig?.mcpServers;
+      if (projectServers && typeof projectServers === "object") {
+        blocks.push({ entries: projectServers, scope: projectPath });
+      }
+    }
+  }
+  return blocks;
 }
 
 export function discoverAll(workspaceFolders: string[]): ScannedFile[] {

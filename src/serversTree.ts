@@ -51,7 +51,9 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     const errors = server.issues.filter((i) => i.level === "error").length;
     const warnings = server.issues.filter((i) => i.level === "warning").length;
     const item = new vscode.TreeItem(server.name, vscode.TreeItemCollapsibleState.None);
-    item.description = server.transport.kind;
+    item.description = server.scope
+      ? `${server.transport.kind} · ${projectName(server.scope)}`
+      : server.transport.kind;
     item.iconPath = new vscode.ThemeIcon(
       errors ? "error" : warnings ? "warning" : "pass",
     );
@@ -59,6 +61,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
       [
         `**${server.name}** · \`${server.transport.kind}\``,
         `Source: ${SOURCE_LABELS[server.source]}`,
+        ...(server.scope ? [`Project: \`${server.scope}\``] : []),
         `Config: \`${server.configPath}\``,
         ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${i.message}`),
       ].join("\n\n"),
@@ -66,4 +69,9 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     item.contextValue = "mcpServer";
     return item;
   }
+}
+
+function projectName(scope: string): string {
+  const parts = scope.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? scope;
 }

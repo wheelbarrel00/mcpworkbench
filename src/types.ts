@@ -23,6 +23,7 @@ export interface DiscoveredServer {
   source: McpSource;
   configPath: string;
   rootKey: "servers" | "mcpServers";
+  scope?: string;
   raw: unknown;
   issues: ConfigIssue[];
 }
