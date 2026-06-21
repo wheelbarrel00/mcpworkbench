@@ -97,7 +97,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
       [
         `**${mdText(server.name)}** · \`${server.transport.kind}\``,
         `Source: ${mdText(SOURCE_LABELS[server.source])}`,
-        ...(server.scope ? [`Project: \`${mdCode(server.scope)}\``] : []),
+        ...(server.scope ? [`Project: \`${mdCode(homePath(server.scope))}\``] : []),
         `Config: \`${mdCode(homePath(server.configPath))}\``,
         ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${mdText(i.message)}`),
       ].join("\n\n"),
@@ -122,10 +122,12 @@ function baseName(p: string): string {
 }
 
 function homePath(p: string): string {
-  if (p.toLowerCase() === HOME.toLowerCase()) {
+  const lower = p.replace(/\\/g, "/").toLowerCase();
+  const home = HOME.replace(/\\/g, "/").toLowerCase();
+  if (lower === home) {
     return "~";
   }
-  if (p.toLowerCase().startsWith(HOME.toLowerCase())) {
+  if (lower.startsWith(home)) {
     const next = p[HOME.length];
     if (next === "/" || next === "\\") {
       return "~" + p.slice(HOME.length);

@@ -36,6 +36,8 @@ Hover any server to see its source, the exact config file it came from, and ever
 | Claude Code (user) | `~/.claude.json` | `mcpServers` |
 | Claude Desktop | `~/.claude/claude_desktop_config.json` | `mcpServers` |
 
+Servers recorded per project under `projects["<path>"].mcpServers` in `~/.claude.json` are scoped to the open workspace folder by default. Set `mcpWorkbench.showAllClaudeProjects` to list every recorded project. Edits to the global config files above refresh the tree automatically.
+
 ## Validation checks
 
 | Issue | Level | What it catches |
@@ -43,8 +45,10 @@ Hover any server to see its source, the exact config file it came from, and ever
 | `missing-root-key` | error | The right file with the wrong top-level key, so the editor loads no servers without warning. |
 | `bad-json` | error | A config file that can't be parsed. |
 | `unknown-transport` | error | An entry with neither a `command` (stdio) nor a `url` (http/sse). |
+| `empty-root-key` | warning | The root key is present but defines no servers. |
 | `npx-missing-y` | warning | `npx` without `-y`/`--yes`, which can hang waiting for an install prompt. |
 | `env-unset` | warning | A `${VAR}` / `${env:VAR}` reference that isn't set in your environment. |
+| `non-string-arg` / `non-string-value` | warning | A non-string arg, env value, or header that would otherwise be silently coerced. |
 
 ## Getting started
 
@@ -77,5 +81,8 @@ Then reload Cursor and open the MCP Workbench panel from the activity bar.
 ## Roadmap
 
 - Fire a live `tools/call` from the test panel and render the result.
-- Parse per-project servers nested under `projects["<path>"].mcpServers` in `~/.claude.json`.
 - Opt-in support for VS Code user-profile `mcp.json` paths.
+
+## License
+
+[MIT](LICENSE)

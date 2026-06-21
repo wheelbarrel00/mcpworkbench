@@ -129,3 +129,23 @@ test("backticks and markdown metacharacters in a server name are escaped in the 
   assert.ok(value.includes("weird\\`"), "backtick should be backslash-escaped");
   assert.ok(value.includes("\\*"), "asterisk should be backslash-escaped");
 });
+
+test("a forward-slash project path under home is shown with ~ and no username", () => {
+  const home = process.env.USERPROFILE;
+  const scope = home.replace(/\\/g, "/") + "/Documents/demo";
+  const p = providerFor([]);
+  const item = p.getTreeItem({
+    kind: "server",
+    id: "x",
+    server: {
+      name: "s",
+      transport: { kind: "stdio", command: "node", args: [], env: {} },
+      source: "claude-code-user",
+      configPath: path.join(home, ".claude.json"),
+      scope,
+      issues: [],
+    },
+  });
+  assert.match(item.tooltip.value, /Project: `~\/Documents\/demo`/);
+  assert.ok(!item.tooltip.value.includes(path.basename(home)), "home dir name should not leak");
+});
