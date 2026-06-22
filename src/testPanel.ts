@@ -44,11 +44,14 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
   }
 
   session = opened.session;
+  const info = opened.session.info;
   panel.webview.html = page(
     server.name,
     header(server, `<p class="status ok">✓ Connected</p>`) +
-      serverSection(opened.session.info) +
-      toolsSection(opened.session.info.tools),
+      serverSection(info) +
+      toolsSection(info.tools) +
+      resourcesSection(info) +
+      promptsSection(info),
     nonce(),
   );
 }
@@ -63,7 +66,7 @@ async function disposeSession(): Promise<void> {
 }
 
 async function handleMessage(message: any): Promise<void> {
-  if (!message || message.type !== "call" || typeof message.tool !== "string") {
+  if (!message || typeof message.type !== "string") {
     return;
   }
   const current = session;
@@ -71,6 +74,16 @@ async function handleMessage(message: any): Promise<void> {
   if (!current || !target) {
     return;
   }
+  if (message.type === "call") {
+    await handleCall(current, target, message);
+  } else if (message.type === "read") {
+    await handleRead(current, target, message);
+  } else if (message.type === "getPrompt") {
+    await handleGetPrompt(current, target, message);
+  }
+}
+
+async function handleCall(current: McpSession, target: vscode.WebviewPanel, message: any): Promise<void> {
   const idx = message.idx;
   if (!current.info.tools.some((t) => t.name === message.tool)) {
     target.webview.postMessage({ type: "result", idx, ok: false, error: "Unknown tool." });
@@ -106,6 +119,54 @@ async function handleMessage(message: any): Promise<void> {
   } else {
     target.webview.postMessage({ type: "result", idx, ok: false, error: result.error, detail: result.detail });
   }
+}
+
+async function handleRead(current: McpSession, target: vscode.WebviewPanel, message: any): Promise<void> {
+  const ridx = message.ridx;
+  const uri = typeof message.uri === "string" ? message.uri.trim() : "";
+  if (!uri) {
+    target.webview.postMessage({ type: "readResult", ridx, ok: false, error: "No resource URI." });
+    return;
+  }
+  const result = await current.readResource(uri);
+  if (session !== current || panel !== target) {
+    return;
+  }
+  if (result.ok) {
+    target.webview.postMessage({ type: "readResult", ridx, ok: true, contents: result.contents });
+  } else {
+    target.webview.postMessage({ type: "readResult", ridx, ok: false, error: result.error, detail: result.detail });
+  }
+}
+
+async function handleGetPrompt(current: McpSession, target: vscode.WebviewPanel, message: any): Promise<void> {
+  const pidx = message.pidx;
+  const name = typeof message.name === "string" ? message.name : "";
+  if (!name || !current.info.prompts.some((p) => p.name === name)) {
+    target.webview.postMessage({ type: "promptResult", pidx, ok: false, error: "Unknown prompt." });
+    return;
+  }
+  const result = await current.getPrompt(name, stringRecord(message.args));
+  if (session !== current || panel !== target) {
+    return;
+  }
+  if (result.ok) {
+    target.webview.postMessage({ type: "promptResult", pidx, ok: true, description: result.description, messages: result.messages });
+  } else {
+    target.webview.postMessage({ type: "promptResult", pidx, ok: false, error: result.error, detail: result.detail });
+  }
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof item === "string") {
+        out[key] = item;
+      }
+    }
+  }
+  return out;
 }
 
 function failureBody(server: DiscoveredServer, result: TestFailure): string {
@@ -166,6 +227,68 @@ function toolsSection(tools: ToolSummary[]): string {
     .join("");
   return `<section><h2>Tools <span class="count">${tools.length}</span></h2>
   <p class="muted">Edit the arguments as JSON, then run the tool against the live server.</p>
+  <ul class="tools">${items}</ul></section>`;
+}
+
+function resourcesSection(info: TestSuccess): string {
+  const { resources, resourceTemplates } = info;
+  if (!resources.length && !resourceTemplates.length) {
+    return "";
+  }
+  const fixed = resources
+    .map(
+      (r, i) => `<li class="resource" data-ridx="r${i}" data-uri="${esc(r.uri)}">
+      <div class="tool-name">${esc(r.title || r.name || r.uri)}</div>
+      <code class="target">${esc(r.uri)}</code>
+      ${r.description ? `<div class="tool-desc">${esc(r.description)}</div>` : ""}
+      ${r.mimeType ? `<div class="muted">${esc(r.mimeType)}</div>` : ""}
+      <div class="call-row"><button class="read" type="button">Read</button></div>
+      <div class="result" hidden></div>
+    </li>`,
+    )
+    .join("");
+  const templates = resourceTemplates
+    .map(
+      (t, i) => `<li class="resource" data-ridx="t${i}">
+      <div class="tool-name">${esc(t.title || t.name || t.uriTemplate)} <span class="count">template</span></div>
+      ${t.description ? `<div class="tool-desc">${esc(t.description)}</div>` : ""}
+      <div class="call-row">
+        <input class="uri" type="text" spellcheck="false" value="${esc(t.uriTemplate)}" aria-label="Resource URI">
+        <button class="read" type="button">Read</button>
+      </div>
+      <div class="result" hidden></div>
+    </li>`,
+    )
+    .join("");
+  const count = resources.length + resourceTemplates.length;
+  return `<section><h2>Resources <span class="count">${count}</span></h2>
+  <p class="muted">Read a resource's contents from the live server. Fill in any variables in a template URI before reading.</p>
+  <ul class="tools">${fixed}${templates}</ul></section>`;
+}
+
+function promptsSection(info: TestSuccess): string {
+  if (!info.prompts.length) {
+    return "";
+  }
+  const items = info.prompts
+    .map((p, i) => {
+      const args = p.arguments
+        .map(
+          (a) => `<label class="parg-row"><span class="parg-name">${esc(a.name)}${a.required ? ' <span class="req">*</span>' : ""}</span>
+        <input class="parg" data-arg="${esc(a.name)}" data-required="${a.required ? "true" : "false"}" type="text" spellcheck="false"${a.description ? ` placeholder="${esc(a.description)}"` : ""}></label>`,
+        )
+        .join("");
+      return `<li class="prompt" data-pidx="${i}" data-name="${esc(p.name)}">
+      <div class="tool-name">${esc(p.title || p.name)}</div>
+      ${p.description ? `<div class="tool-desc">${esc(p.description)}</div>` : ""}
+      ${args ? `<div class="pargs">${args}</div>` : ""}
+      <div class="call-row"><button class="get" type="button">Get prompt</button></div>
+      <div class="result" hidden></div>
+    </li>`;
+    })
+    .join("");
+  return `<section><h2>Prompts <span class="count">${info.prompts.length}</span></h2>
+  <p class="muted">Fetch a prompt's messages from the live server, filling in any arguments.</p>
   <ul class="tools">${items}</ul></section>`;
 }
 
@@ -284,41 +407,116 @@ function renderBlock(out, block) {
   }
   out.appendChild(pre(JSON.stringify(block, null, 2)));
 }
+function startResult(li, button) {
+  const out = li.querySelector('.result');
+  out.hidden = false;
+  out.textContent = '';
+  out.appendChild(note('running', button.dataset.busy || 'Working…'));
+  button.disabled = true;
+  return out;
+}
+function ready(li, buttonSelector) {
+  const out = li.querySelector('.result');
+  const button = li.querySelector(buttonSelector);
+  if (button) { button.disabled = false; }
+  out.hidden = false;
+  out.textContent = '';
+  return out;
+}
 for (const button of document.querySelectorAll('button.call')) {
+  button.dataset.busy = 'Calling…';
   button.addEventListener('click', () => {
     const li = button.closest('.tool');
-    const out = li.querySelector('.result');
-    out.hidden = false;
-    out.textContent = '';
-    out.appendChild(note('running', 'Calling…'));
-    button.disabled = true;
+    startResult(li, button);
     vscode.postMessage({ type: 'call', idx: li.dataset.idx, tool: li.dataset.tool, args: li.querySelector('textarea.args').value });
+  });
+}
+for (const button of document.querySelectorAll('button.read')) {
+  button.dataset.busy = 'Reading…';
+  button.addEventListener('click', () => {
+    const li = button.closest('.resource');
+    const input = li.querySelector('input.uri');
+    const uri = input ? input.value.trim() : li.dataset.uri;
+    startResult(li, button);
+    vscode.postMessage({ type: 'read', ridx: li.dataset.ridx, uri: uri });
+  });
+}
+for (const button of document.querySelectorAll('button.get')) {
+  button.dataset.busy = 'Getting…';
+  button.addEventListener('click', () => {
+    const li = button.closest('.prompt');
+    const args = {};
+    let missing = null;
+    for (const input of li.querySelectorAll('input.parg')) {
+      const value = input.value;
+      if (input.dataset.required === 'true' && !value.trim()) { missing = missing || input.dataset.arg; }
+      if (value !== '') { args[input.dataset.arg] = value; }
+    }
+    if (missing) {
+      const out = li.querySelector('.result');
+      out.hidden = false; out.textContent = '';
+      out.appendChild(note('result-error', 'Missing required argument: ' + missing));
+      return;
+    }
+    startResult(li, button);
+    vscode.postMessage({ type: 'getPrompt', pidx: li.dataset.pidx, name: li.dataset.name, args: args });
   });
 }
 window.addEventListener('message', (event) => {
   const m = event.data;
-  if (!m || m.type !== 'result') { return; }
-  const li = document.querySelector('.tool[data-idx="' + Number(m.idx) + '"]');
-  if (!li) { return; }
-  const out = li.querySelector('.result');
-  const button = li.querySelector('button.call');
-  button.disabled = false;
-  out.hidden = false;
-  out.textContent = '';
-  if (!m.ok) {
-    out.appendChild(note('result-error', m.error || 'Call failed'));
-    if (m.detail) { out.appendChild(pre(m.detail)); }
+  if (!m) { return; }
+  if (m.type === 'result') {
+    const li = document.querySelector('.tool[data-idx="' + m.idx + '"]');
+    if (!li) { return; }
+    const out = ready(li, 'button.call');
+    if (!m.ok) {
+      out.appendChild(note('result-error', m.error || 'Call failed'));
+      if (m.detail) { out.appendChild(pre(m.detail)); }
+      return;
+    }
+    if (m.isError) { out.appendChild(note('result-error', 'Tool reported isError = true')); }
+    const blocks = Array.isArray(m.blocks) ? m.blocks : [];
+    if (!blocks.length && m.structured === undefined) {
+      out.appendChild(note('muted', 'Tool returned no content.'));
+    }
+    for (const block of blocks) { renderBlock(out, block); }
+    if (m.structured !== undefined) {
+      out.appendChild(note('result-label', 'structuredContent'));
+      out.appendChild(pre(JSON.stringify(m.structured, null, 2)));
+    }
     return;
   }
-  if (m.isError) { out.appendChild(note('result-error', 'Tool reported isError = true')); }
-  const blocks = Array.isArray(m.blocks) ? m.blocks : [];
-  if (!blocks.length && m.structured === undefined) {
-    out.appendChild(note('muted', 'Tool returned no content.'));
+  if (m.type === 'readResult') {
+    const li = document.querySelector('.resource[data-ridx="' + m.ridx + '"]');
+    if (!li) { return; }
+    const out = ready(li, 'button.read');
+    if (!m.ok) {
+      out.appendChild(note('result-error', m.error || 'Read failed'));
+      if (m.detail) { out.appendChild(pre(m.detail)); }
+      return;
+    }
+    const contents = Array.isArray(m.contents) ? m.contents : [];
+    if (!contents.length) { out.appendChild(note('muted', 'Resource is empty.')); }
+    for (const content of contents) { renderBlock(out, { type: 'resource', resource: content }); }
+    return;
   }
-  for (const block of blocks) { renderBlock(out, block); }
-  if (m.structured !== undefined) {
-    out.appendChild(note('result-label', 'structuredContent'));
-    out.appendChild(pre(JSON.stringify(m.structured, null, 2)));
+  if (m.type === 'promptResult') {
+    const li = document.querySelector('.prompt[data-pidx="' + m.pidx + '"]');
+    if (!li) { return; }
+    const out = ready(li, 'button.get');
+    if (!m.ok) {
+      out.appendChild(note('result-error', m.error || 'Get failed'));
+      if (m.detail) { out.appendChild(pre(m.detail)); }
+      return;
+    }
+    if (m.description) { out.appendChild(note('result-label', m.description)); }
+    const messages = Array.isArray(m.messages) ? m.messages : [];
+    if (!messages.length) { out.appendChild(note('muted', 'Prompt returned no messages.')); }
+    for (const message of messages) {
+      out.appendChild(note('result-label', message && message.role ? message.role : 'message'));
+      renderBlock(out, message ? message.content : null);
+    }
+    return;
   }
 });
 `;
@@ -346,10 +544,15 @@ dd { margin: 0; }
 .tool-desc { color: var(--vscode-descriptionForeground); margin: 4px 0; font-size: 0.9em; }
 .count { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 8px; padding: 0 8px; font-size: 0.75em; vertical-align: middle; }
 .call-row { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-textarea.args { width: 100%; box-sizing: border-box; font-family: var(--vscode-editor-font-family); font-size: 0.85em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; padding: 6px; resize: vertical; }
-button.call { align-self: flex-start; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 4px 14px; cursor: pointer; font-size: 0.85em; }
-button.call:hover { background: var(--vscode-button-hoverBackground); }
-button.call:disabled { opacity: 0.6; cursor: default; }
+textarea.args, input.uri, input.parg { width: 100%; box-sizing: border-box; font-family: var(--vscode-editor-font-family); font-size: 0.85em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; padding: 6px; }
+textarea.args { resize: vertical; }
+.pargs { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.parg-row { display: flex; flex-direction: column; gap: 2px; }
+.parg-name { font-size: 0.8em; color: var(--vscode-descriptionForeground); }
+.req { color: var(--vscode-errorForeground); }
+button.call, button.read, button.get { align-self: flex-start; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 4px 14px; cursor: pointer; font-size: 0.85em; }
+button.call:hover, button.read:hover, button.get:hover { background: var(--vscode-button-hoverBackground); }
+button.call:disabled, button.read:disabled, button.get:disabled { opacity: 0.6; cursor: default; }
 .result { margin-top: 10px; border-top: 1px solid var(--vscode-panel-border); padding-top: 8px; }
 .running { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 .result-error { color: var(--vscode-errorForeground); font-weight: 600; margin-bottom: 6px; }

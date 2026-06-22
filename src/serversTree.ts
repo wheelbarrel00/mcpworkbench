@@ -14,6 +14,12 @@ const SOURCE_LABELS: Record<McpSource, string> = {
   "claude-desktop": "Claude Desktop",
 };
 
+const ISSUE_ICON: Record<"error" | "warning" | "info", string> = {
+  error: "❌",
+  warning: "⚠️",
+  info: "ℹ️",
+};
+
 type Node = SourceNode | ServerNode | NoteNode;
 interface SourceNode { kind: "source"; label: string; file: ScannedFile; id: string; }
 interface ServerNode { kind: "server"; server: DiscoveredServer; id: string; }
@@ -22,14 +28,18 @@ interface NoteNode { kind: "note"; text: string; level: "info" | "error" | "warn
 export class ServersProvider implements vscode.TreeDataProvider<Node> {
   private _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
+  private _onDidScan = new vscode.EventEmitter<ScannedFile[]>();
+  readonly onDidScan = this._onDidScan.event;
   private files: ScannedFile[] = [];
 
   refresh(): void {
     const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
-    const showAllClaudeProjects = vscode.workspace
-      .getConfiguration("mcpWorkbench")
-      .get<boolean>("showAllClaudeProjects", false);
-    this.files = discoverAll(folders, { showAllClaudeProjects });
+    const config = vscode.workspace.getConfiguration("mcpWorkbench");
+    const showAllClaudeProjects = config.get<boolean>("showAllClaudeProjects", false);
+    const securityEnabled = config.get<boolean>("security.enabled", true);
+    const ruleSeverity = config.get<Record<string, string>>("security.ruleSeverity", {});
+    this.files = discoverAll(folders, { showAllClaudeProjects, securityEnabled, ruleSeverity });
+    this._onDidScan.fire(this.files);
     this._onDidChange.fire();
   }
 
@@ -99,7 +109,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
         `Source: ${mdText(SOURCE_LABELS[server.source])}`,
         ...(server.scope ? [`Project: \`${mdCode(homePath(server.scope))}\``] : []),
         `Config: \`${mdCode(homePath(server.configPath))}\``,
-        ...server.issues.map((i) => `- ${i.level === "error" ? "❌" : "⚠️"} ${mdText(i.message)}`),
+        ...server.issues.map((i) => `- ${ISSUE_ICON[i.level]} ${mdText(i.message)}`),
       ].join("\n\n"),
     );
     item.contextValue = "mcpServer";

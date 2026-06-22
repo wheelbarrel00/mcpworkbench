@@ -109,6 +109,40 @@ test("openSession lists tools and a live tools/call returns the result", { timeo
   }
 });
 
+test("openSession lists resources and prompts and can read and get them", { timeout: 15000 }, async () => {
+  const server = {
+    name: "echo",
+    transport: { kind: "stdio", command: process.execPath, args: [echoServerPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const opened = await openSession(server, 12000);
+  assert.equal(opened.ok, true);
+  try {
+    const info = opened.session.info;
+    assert.ok(info.resources.some((r) => r.uri === "echo://greeting"));
+    assert.ok(info.resourceTemplates.some((t) => t.uriTemplate === "echo://item/{id}"));
+    assert.ok(info.prompts.some((p) => p.name === "greet"));
+
+    const read = await opened.session.readResource("echo://greeting");
+    assert.equal(read.ok, true);
+    const text = read.contents.map((c) => (c && typeof c.text === "string" ? c.text : "")).join("");
+    assert.match(text, /hello from resource/);
+
+    const prompt = await opened.session.getPrompt("greet", { name: "Ada" });
+    assert.equal(prompt.ok, true);
+    const messageText = prompt.messages
+      .map((m) => (m && m.content && m.content.type === "text" ? m.content.text : ""))
+      .join("");
+    assert.match(messageText, /Hello, Ada/);
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
 test("a referenced env var that is not set fails with a clear error", async () => {
   delete process.env.MCPWB_MISSING_HEADER;
   const server = {

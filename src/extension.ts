@@ -3,6 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import { ServersProvider } from "./serversTree";
 import { showTester } from "./testPanel";
+import { McpDiagnostics } from "./diagnostics";
 import { DiscoveredServer } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
@@ -18,8 +19,11 @@ export function activate(context: vscode.ExtensionContext) {
   console.log("[MCP Workbench] activated");
 
   const provider = new ServersProvider();
+  const diagnostics = new McpDiagnostics();
 
   context.subscriptions.push(
+    diagnostics,
+    provider.onDidScan((files) => void diagnostics.publish(files)),
     vscode.window.registerTreeDataProvider("mcpWorkbench.servers", provider),
     vscode.commands.registerCommand("mcpWorkbench.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("mcpWorkbench.openConfig", async (arg: unknown) => {

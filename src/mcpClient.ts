@@ -6,12 +6,41 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.2.2";
+const CLIENT_VERSION = "0.3.0";
 
 export interface ToolSummary {
   name: string;
   description?: string;
   inputSchema: unknown;
+}
+
+export interface ResourceSummary {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface ResourceTemplateSummary {
+  uriTemplate: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface PromptArgSummary {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface PromptSummary {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments: PromptArgSummary[];
 }
 
 export interface TestSuccess {
@@ -20,6 +49,9 @@ export interface TestSuccess {
   instructions?: string;
   capabilities: unknown;
   tools: ToolSummary[];
+  resources: ResourceSummary[];
+  resourceTemplates: ResourceTemplateSummary[];
+  prompts: PromptSummary[];
 }
 
 export interface TestFailure {
@@ -45,9 +77,26 @@ export interface ToolCallFailure {
 
 export type ToolCallResult = ToolCallSuccess | ToolCallFailure;
 
+export interface ResourceReadSuccess {
+  ok: true;
+  contents: unknown[];
+}
+
+export type ResourceReadResult = ResourceReadSuccess | ToolCallFailure;
+
+export interface PromptGetSuccess {
+  ok: true;
+  description?: string;
+  messages: unknown[];
+}
+
+export type PromptGetResult = PromptGetSuccess | ToolCallFailure;
+
 export interface McpSession {
   info: TestSuccess;
   callTool(name: string, args: unknown): Promise<ToolCallResult>;
+  readResource(uri: string): Promise<ResourceReadResult>;
+  getPrompt(name: string, args: Record<string, string>): Promise<PromptGetResult>;
   dispose(): Promise<void>;
 }
 
@@ -75,6 +124,15 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
     const tools = capabilities?.tools
       ? (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary)
       : [];
+    const resources = capabilities?.resources
+      ? await safeList(async () => (await client.listResources(undefined, { timeout: timeoutMs })).resources.map(toResourceSummary))
+      : [];
+    const resourceTemplates = capabilities?.resources
+      ? await safeList(async () => (await client.listResourceTemplates(undefined, { timeout: timeoutMs })).resourceTemplates.map(toResourceTemplateSummary))
+      : [];
+    const prompts = capabilities?.prompts
+      ? await safeList(async () => (await client.listPrompts(undefined, { timeout: timeoutMs })).prompts.map(toPromptSummary))
+      : [];
     const serverInfo = client.getServerVersion();
     const info: TestSuccess = {
       ok: true,
@@ -82,6 +140,9 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
       instructions: client.getInstructions(),
       capabilities,
       tools,
+      resources,
+      resourceTemplates,
+      prompts,
     };
     const session: McpSession = {
       info,
@@ -97,6 +158,26 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
             isError: res.isError === true,
             content: Array.isArray(res.content) ? res.content : [],
             structuredContent: res.structuredContent,
+          };
+        } catch (e) {
+          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+        }
+      },
+      async readResource(uri) {
+        try {
+          const res = await client.readResource({ uri }, { timeout: timeoutMs });
+          return { ok: true, contents: Array.isArray(res.contents) ? res.contents : [] };
+        } catch (e) {
+          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+        }
+      },
+      async getPrompt(name, args) {
+        try {
+          const res = await client.getPrompt({ name, arguments: args }, { timeout: timeoutMs });
+          return {
+            ok: true,
+            description: typeof res.description === "string" ? res.description : undefined,
+            messages: Array.isArray(res.messages) ? res.messages : [],
           };
         } catch (e) {
           return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
@@ -189,6 +270,31 @@ function mapValues(obj: Record<string, string>, fn: (value: string) => string): 
 
 function toSummary(tool: { name: string; description?: string; inputSchema: unknown }): ToolSummary {
   return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema };
+}
+
+async function safeList<T>(fn: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await fn();
+  } catch {
+    return [];
+  }
+}
+
+function toResourceSummary(r: { uri: string; name?: string; title?: string; description?: string; mimeType?: string }): ResourceSummary {
+  return { uri: r.uri, name: r.name, title: r.title, description: r.description, mimeType: r.mimeType };
+}
+
+function toResourceTemplateSummary(t: { uriTemplate: string; name?: string; title?: string; description?: string; mimeType?: string }): ResourceTemplateSummary {
+  return { uriTemplate: t.uriTemplate, name: t.name, title: t.title, description: t.description, mimeType: t.mimeType };
+}
+
+function toPromptSummary(p: { name: string; title?: string; description?: string; arguments?: { name: string; description?: string; required?: boolean }[] }): PromptSummary {
+  return {
+    name: p.name,
+    title: p.title,
+    description: p.description,
+    arguments: Array.isArray(p.arguments) ? p.arguments.map((a) => ({ name: a.name, description: a.description, required: a.required })) : [],
+  };
 }
 
 function msg(e: unknown): string {

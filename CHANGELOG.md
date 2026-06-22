@@ -4,6 +4,15 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-21
+
+### Added
+
+- Problems-panel diagnostics: every validation issue is now published as a native VS Code diagnostic anchored to the exact key in the config file, so issues appear as inline squiggles and in the Problems panel with click-to-jump.
+- Security & correctness checks over the config you already have: hardcoded API keys or private keys in args/env/headers (`hardcoded-secret`), credentials in a URL's userinfo or query string (`credential-in-url`), plaintext `http://` to a non-local host (`insecure-remote-transport`), `curl … | sh` bootstrap chains (`risky-shell-pipe`), encoded PowerShell commands (`encoded-powershell`), cloud-metadata endpoints (`metadata-endpoint`), and unpinned `npx`/`bunx`/`pnpm dlx`/`yarn dlx`/`npm exec` launchers (`unpinned-launcher`).
+- Resources and prompts in the Test Server panel: it now lists resources, resource templates, and prompts alongside tools. Read any resource (or fill in a template URI) to render its contents, and fetch a prompt's messages by filling in its arguments — all against the live server.
+- Settings to tune the security lens: `mcpWorkbench.security.enabled` turns all security checks on or off, and `mcpWorkbench.security.ruleSeverity` overrides the severity of an individual rule (`off`, `info`, `warning`, or `error`).
+
 ## [0.2.2] - 2026-06-21
 
 ### Fixed

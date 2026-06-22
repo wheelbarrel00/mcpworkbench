@@ -2,7 +2,7 @@
   "name": "mcp-workbench-wb00",
   "displayName": "MCP Workbench: Discover & Test",
   "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "license": "MIT",
   "icon": "media/logo.png",
   "publisher": "wheelbarrel00",
@@ -92,6 +92,20 @@
           "type": "boolean",
           "default": false,
           "description": "Show MCP servers from every project recorded in ~/.claude.json, not just the project that matches an open workspace folder."
+        },
+        "mcpWorkbench.security.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the security & correctness checks (hardcoded secrets, credentials in URLs, plaintext http:// remotes, unpinned launchers, shell-pipe bootstrap chains, cloud-metadata endpoints). Turn off to show only the structural configuration checks."
+        },
+        "mcpWorkbench.security.ruleSeverity": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Override the severity of individual security rules. Keys are rule ids; values are `off`, `info`, `warning`, or `error`. Example: `{ \"unpinned-launcher\": \"off\", \"hardcoded-secret\": \"error\" }`. Ids: `hardcoded-secret`, `credential-in-url`, `insecure-remote-transport`, `risky-shell-pipe`, `encoded-powershell`, `metadata-endpoint`, `unpinned-launcher`.",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["off", "info", "warning", "error"]
+          }
         }
       }
     }

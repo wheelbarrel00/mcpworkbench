@@ -11,10 +11,14 @@ export type McpSource =
   | "claude-code-user"
   | "claude-desktop";
 
+export type JsonPath = (string | number)[];
+
 export interface ConfigIssue {
   level: "error" | "warning" | "info";
   code: string;
   message: string;
+  path?: JsonPath;
+  offset?: number;
 }
 
 export interface DiscoveredServer {
