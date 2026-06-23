@@ -211,23 +211,239 @@ function toolsSection(tools: ToolSummary[]): string {
   if (!tools.length) {
     return `<section><h2>Tools</h2><p class="muted">This server exposes no tools.</p></section>`;
   }
-  const items = tools
-    .map(
-      (t, i) => `<li class="tool" data-idx="${i}" data-tool="${esc(t.name)}">
-      <div class="tool-name">${esc(t.name)}</div>
+  const items = tools.map((t, i) => toolItem(t, i)).join("");
+  return `<section><h2>Tools <span class="count">${tools.length}</span></h2>
+  <p class="muted">Fill in the arguments, then run the tool against the live server. Switch to JSON for advanced edits.</p>
+  <ul class="tools">${items}</ul></section>`;
+}
+
+type FieldKind = "string" | "integer" | "number" | "boolean" | "enum" | "const" | "array-lines";
+
+interface EnumOption {
+  value: string;
+  label: string;
+}
+
+interface FieldSpec {
+  key: string;
+  kind: FieldKind;
+  required: boolean;
+  label: string;
+  description?: string;
+  defaultValue?: unknown;
+  multiline?: boolean;
+  options?: EnumOption[];
+  itemType?: "string" | "number" | "integer" | "boolean";
+  minItems?: number;
+  constJson?: string;
+  min?: number;
+  max?: number;
+  minLength?: number;
+  maxLength?: number;
+}
+
+const SCALAR_TYPES = new Set(["string", "number", "integer", "boolean"]);
+
+function isPrimitive(v: unknown): boolean {
+  return v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+}
+
+function hasComposition(d: Record<string, unknown>): boolean {
+  return "oneOf" in d || "anyOf" in d || "allOf" in d || "$ref" in d || "not" in d;
+}
+
+function numberOrUndef(v: unknown): number | undefined {
+  return typeof v === "number" && isFinite(v) ? v : undefined;
+}
+
+function classifyField(key: string, def: unknown, required: boolean): FieldSpec | undefined {
+  if (!def || typeof def !== "object" || Array.isArray(def)) {
+    return undefined;
+  }
+  const d = def as Record<string, any>;
+  if (hasComposition(d)) {
+    return undefined;
+  }
+  const base: FieldSpec = {
+    key,
+    kind: "string",
+    required,
+    label: typeof d.title === "string" && d.title ? d.title : key,
+    description: typeof d.description === "string" ? d.description : undefined,
+    defaultValue: d.default,
+  };
+
+  if ("const" in d) {
+    if (!isPrimitive(d.const)) {
+      return undefined;
+    }
+    return { ...base, kind: "const", constJson: JSON.stringify(d.const) };
+  }
+
+  if (Array.isArray(d.enum)) {
+    if (!d.enum.length || !d.enum.every(isPrimitive)) {
+      return undefined;
+    }
+    return { ...base, kind: "enum", options: d.enum.map((e: unknown) => ({ value: JSON.stringify(e), label: String(e) })) };
+  }
+
+  if (typeof d.type !== "string") {
+    return undefined;
+  }
+  switch (d.type) {
+    case "string": {
+      const maxLength = numberOrUndef(d.maxLength);
+      const multiline = d.format === "textarea" || d.format === "multi-line" || (maxLength !== undefined && maxLength > 120);
+      return { ...base, kind: "string", multiline, minLength: numberOrUndef(d.minLength), maxLength };
+    }
+    case "integer":
+      return { ...base, kind: "integer", min: numberOrUndef(d.minimum), max: numberOrUndef(d.maximum) };
+    case "number":
+      return { ...base, kind: "number", min: numberOrUndef(d.minimum), max: numberOrUndef(d.maximum) };
+    case "boolean":
+      return { ...base, kind: "boolean" };
+    case "array": {
+      const items = d.items;
+      if (!items || typeof items !== "object" || Array.isArray(items)) {
+        return undefined;
+      }
+      const itemType = (items as Record<string, unknown>).type;
+      if (typeof itemType !== "string" || !SCALAR_TYPES.has(itemType)) {
+        return undefined;
+      }
+      return { ...base, kind: "array-lines", itemType: itemType as FieldSpec["itemType"], minItems: numberOrUndef(d.minItems) };
+    }
+    default:
+      return undefined;
+  }
+}
+
+export function formFields(schema: unknown): FieldSpec[] | undefined {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return undefined;
+  }
+  const s = schema as Record<string, any>;
+  if (hasComposition(s)) {
+    return undefined;
+  }
+  if (s.type !== undefined && (typeof s.type !== "string" || s.type !== "object")) {
+    return undefined;
+  }
+  const props = s.properties;
+  const hasProps = props && typeof props === "object" && !Array.isArray(props) && Object.keys(props).length > 0;
+  if (!hasProps) {
+    const ap = s.additionalProperties;
+    if (ap === true || (ap && typeof ap === "object")) {
+      return undefined;
+    }
+    return [];
+  }
+  const required = Array.isArray(s.required) ? s.required.filter((x: unknown) => typeof x === "string") : [];
+  const fields: FieldSpec[] = [];
+  for (const [key, def] of Object.entries(props as Record<string, unknown>)) {
+    const field = classifyField(key, def, required.includes(key));
+    if (!field) {
+      return undefined;
+    }
+    fields.push(field);
+  }
+  return fields;
+}
+
+export function isFormable(schema: unknown): boolean {
+  return formFields(schema) !== undefined;
+}
+
+export function argForm(fields: FieldSpec[]): string {
+  if (!fields.length) {
+    return `<p class="muted">No arguments.</p>`;
+  }
+  return `<div class="fields">${fields.map(fieldRow).join("")}</div>`;
+}
+
+function fieldRow(f: FieldSpec): string {
+  const req = f.required ? ` <span class="req">*</span>` : "";
+  const nameSpan = `<span class="field-name">${esc(f.label)}${req}</span>`;
+  const dataReq = ` data-required="${f.required ? "true" : "false"}"`;
+  const dataName = ` data-name="${esc(f.key)}"`;
+  const hint = f.description ?? (typeof f.defaultValue === "string" ? f.defaultValue : "");
+  const placeholder = hint ? ` placeholder="${esc(hint)}"` : "";
+
+  if (f.kind === "boolean") {
+    const checked = f.defaultValue === true ? " checked" : "";
+    return `<label class="field-row check"><input class="field" type="checkbox"${dataName} data-kind="boolean"${checked}> ${nameSpan}</label>`;
+  }
+  if (f.kind === "const") {
+    const constJson = f.constJson ?? "null";
+    return `<label class="field-row">${nameSpan}<input class="field" type="text" disabled${dataName} data-kind="const" data-const="${esc(constJson)}" value="${esc(constDisplay(constJson))}"></label>`;
+  }
+  if (f.kind === "enum") {
+    const options = [`<option value="">— select —</option>`]
+      .concat((f.options ?? []).map((o) => {
+        const selected = f.defaultValue !== undefined && JSON.stringify(f.defaultValue) === o.value ? " selected" : "";
+        return `<option value="${esc(o.value)}"${selected}>${esc(o.label)}</option>`;
+      }))
+      .join("");
+    return `<label class="field-row">${nameSpan}<select class="field"${dataName} data-kind="enum"${dataReq}>${options}</select></label>`;
+  }
+  if (f.kind === "integer" || f.kind === "number") {
+    const step = f.kind === "integer" ? "1" : "any";
+    const min = f.min !== undefined ? ` min="${esc(String(f.min))}"` : "";
+    const max = f.max !== undefined ? ` max="${esc(String(f.max))}"` : "";
+    const value = typeof f.defaultValue === "number" ? ` value="${esc(String(f.defaultValue))}"` : "";
+    return `<label class="field-row">${nameSpan}<input class="field" type="number" step="${step}"${dataName} data-kind="${f.kind}"${dataReq}${min}${max}${value}${placeholder}></label>`;
+  }
+  if (f.kind === "array-lines") {
+    const minItems = f.minItems !== undefined ? ` data-min-items="${esc(String(f.minItems))}"` : "";
+    const value = Array.isArray(f.defaultValue) ? esc(f.defaultValue.map((x) => String(x)).join("\n")) : "";
+    return `<label class="field-row">${nameSpan}<textarea class="field" rows="3" spellcheck="false"${dataName} data-kind="array-lines" data-item="${esc(f.itemType ?? "string")}"${dataReq}${minItems}>${value}</textarea><span class="muted">one per line</span></label>`;
+  }
+  if (f.multiline) {
+    const value = typeof f.defaultValue === "string" ? esc(f.defaultValue) : "";
+    return `<label class="field-row">${nameSpan}<textarea class="field" rows="3" spellcheck="false"${dataName} data-kind="string"${dataReq}${placeholder}>${value}</textarea></label>`;
+  }
+  const value = typeof f.defaultValue === "string" ? ` value="${esc(f.defaultValue)}"` : "";
+  const minLen = f.minLength !== undefined ? ` minlength="${esc(String(f.minLength))}"` : "";
+  const maxLen = f.maxLength !== undefined ? ` maxlength="${esc(String(f.maxLength))}"` : "";
+  return `<label class="field-row">${nameSpan}<input class="field" type="text"${dataName} data-kind="string"${dataReq}${value}${placeholder}${minLen}${maxLen}></label>`;
+}
+
+function constDisplay(constJson: string): string {
+  try {
+    return String(JSON.parse(constJson));
+  } catch {
+    return "";
+  }
+}
+
+export function toolItem(t: ToolSummary, i: number): string {
+  const head = `<div class="tool-name">${esc(t.name)}</div>
       ${t.description ? `<div class="tool-desc">${esc(t.description)}</div>` : ""}
-      <details><summary>Input schema</summary><pre>${esc(stringify(t.inputSchema))}</pre></details>
+      <details><summary>Input schema</summary><pre>${esc(stringify(t.inputSchema))}</pre></details>`;
+  const jsonTextarea = `<textarea class="args" rows="5" spellcheck="false" aria-label="Arguments for ${esc(t.name)}">${esc(argTemplate(t.inputSchema))}</textarea>`;
+  const fields = formFields(t.inputSchema);
+  if (fields === undefined) {
+    return `<li class="tool" data-idx="${i}" data-tool="${esc(t.name)}" data-formable="false">
+      ${head}
       <div class="call-row">
-        <textarea class="args" rows="5" spellcheck="false" aria-label="Arguments for ${esc(t.name)}">${esc(argTemplate(t.inputSchema))}</textarea>
+        ${jsonTextarea}
         <button class="call" type="button">Call tool</button>
       </div>
       <div class="result" hidden></div>
-    </li>`,
-    )
-    .join("");
-  return `<section><h2>Tools <span class="count">${tools.length}</span></h2>
-  <p class="muted">Edit the arguments as JSON, then run the tool against the live server.</p>
-  <ul class="tools">${items}</ul></section>`;
+    </li>`;
+  }
+  return `<li class="tool" data-idx="${i}" data-tool="${esc(t.name)}" data-formable="true" data-mode="form">
+      ${head}
+      <div class="call-row">
+        <div class="form-mode">${argForm(fields)}</div>
+        <div class="json-mode" hidden>${jsonTextarea}</div>
+        <div class="actions">
+          <button class="call" type="button">Call tool</button>
+          <button class="toggle" type="button" data-mode="form">Edit as JSON</button>
+        </div>
+      </div>
+      <div class="result" hidden></div>
+    </li>`;
 }
 
 function resourcesSection(info: TestSuccess): string {
@@ -381,7 +597,7 @@ function page(titleName: string, content: string, scriptNonce?: string): string 
 </html>`;
 }
 
-const SCRIPT = `
+export const SCRIPT = `
 const vscode = acquireVsCodeApi();
 const MAX_OUTPUT = 100000;
 function pre(text) {
@@ -423,12 +639,179 @@ function ready(li, buttonSelector) {
   out.textContent = '';
   return out;
 }
+function clearFieldErrors(li) {
+  for (const err of li.querySelectorAll('.field-error')) { err.remove(); }
+  for (const row of li.querySelectorAll('.field-row.invalid')) { row.classList.remove('invalid'); }
+  for (const el of li.querySelectorAll('.field[aria-invalid]')) { el.removeAttribute('aria-invalid'); }
+}
+function collectFormArgs(li) {
+  const args = {};
+  const missing = [];
+  const bad = [];
+  for (const el of li.querySelectorAll('.field')) {
+    const name = el.dataset.name;
+    const kind = el.dataset.kind;
+    const required = el.dataset.required === 'true';
+    if (kind === 'const') { try { args[name] = JSON.parse(el.dataset.const); } catch (e) {} continue; }
+    if (kind === 'boolean') { args[name] = !!el.checked; continue; }
+    if (kind === 'enum') {
+      const raw = el.value;
+      if (raw === '') { if (required) { missing.push(name); } continue; }
+      try { args[name] = JSON.parse(raw); } catch (e) { bad.push(name); }
+      continue;
+    }
+    if (kind === 'integer' || kind === 'number') {
+      const s = (el.value || '').trim();
+      if (s === '') { if (required) { missing.push(name); } continue; }
+      const n = Number(s);
+      if (!isFinite(n) || (kind === 'integer' && !Number.isInteger(n))) { bad.push(name); continue; }
+      args[name] = n;
+      continue;
+    }
+    if (kind === 'array-lines') {
+      const itemType = el.dataset.item || 'string';
+      const minItems = Number(el.dataset.minItems || '0') || 0;
+      const lines = (el.value || '').split(/\\r?\\n/).map(function (x) { return x.trim(); }).filter(function (x) { return x.length; });
+      if (lines.length === 0) { if (required || minItems > 0) { missing.push(name); } continue; }
+      let arr = [];
+      let invalid = false;
+      for (const line of lines) {
+        if (itemType === 'number' || itemType === 'integer') {
+          const n = Number(line);
+          if (!isFinite(n) || (itemType === 'integer' && !Number.isInteger(n))) { invalid = true; break; }
+          arr.push(n);
+        } else if (itemType === 'boolean') {
+          if (line === 'true') { arr.push(true); } else if (line === 'false') { arr.push(false); } else { invalid = true; break; }
+        } else { arr.push(line); }
+      }
+      if (invalid) { bad.push(name); continue; }
+      if (minItems > 0 && arr.length < minItems) { missing.push(name); continue; }
+      args[name] = arr;
+      continue;
+    }
+    const v = el.value;
+    if (v.trim() === '') { if (required) { missing.push(name); } continue; }
+    args[name] = v;
+  }
+  return { args: args, missing: missing, bad: bad };
+}
+function markFieldErrors(li, missing, bad) {
+  const missingSet = new Set(missing);
+  const badSet = new Set(bad);
+  for (const el of li.querySelectorAll('.field')) {
+    const name = el.dataset.name;
+    let message = null;
+    if (missingSet.has(name)) { message = el.dataset.kind === 'array-lines' ? 'Add at least one item.' : 'Required.'; }
+    else if (badSet.has(name)) { message = el.dataset.kind === 'integer' ? 'Enter a whole number.' : (el.dataset.kind === 'number' ? 'Enter a valid number.' : 'Check the values.'); }
+    if (!message) { continue; }
+    el.setAttribute('aria-invalid', 'true');
+    const row = el.closest('.field-row');
+    if (row) { row.classList.add('invalid'); row.appendChild(note('field-error', message)); }
+  }
+}
+function hydrateForm(li, obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { return false; }
+  const fields = li.querySelectorAll('.field');
+  const known = new Set();
+  for (const el of fields) { known.add(el.dataset.name); }
+  for (const key of Object.keys(obj)) { if (!known.has(key)) { return false; } }
+  const apply = [];
+  for (const el of fields) {
+    const name = el.dataset.name;
+    const kind = el.dataset.kind;
+    if (kind === 'const') { if ((name in obj) && JSON.stringify(obj[name]) !== el.dataset.const) { return false; } continue; }
+    if (!(name in obj)) { apply.push([el, kind, undefined, true]); continue; }
+    const v = obj[name];
+    if (kind === 'boolean') { if (typeof v !== 'boolean') { return false; } apply.push([el, kind, v, false]); }
+    else if (kind === 'enum') {
+      const target = JSON.stringify(v);
+      let ok = false;
+      for (const o of el.options) { if (o.value === target) { ok = true; } }
+      if (!ok) { return false; }
+      apply.push([el, kind, target, false]);
+    }
+    else if (kind === 'integer' || kind === 'number') { if (typeof v !== 'number' || !isFinite(v) || (kind === 'integer' && !Number.isInteger(v))) { return false; } apply.push([el, kind, String(v), false]); }
+    else if (kind === 'array-lines') {
+      if (!Array.isArray(v) || !v.every(function (x) { return typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean'; })) { return false; }
+      apply.push([el, kind, v.map(function (x) { return String(x); }).join('\\n'), false]);
+    }
+    else { if (typeof v !== 'string') { return false; } apply.push([el, kind, v, false]); }
+  }
+  for (const a of apply) {
+    const el = a[0];
+    const kind = a[1];
+    const value = a[2];
+    const reset = a[3];
+    if (kind === 'boolean') { el.checked = reset ? false : value; }
+    else if (reset) { el.value = ''; }
+    else { el.value = value; }
+  }
+  return true;
+}
+function toggleNote(li, message) {
+  const out = li.querySelector('.result');
+  out.hidden = false;
+  out.textContent = '';
+  out.appendChild(note('result-error', message));
+}
 for (const button of document.querySelectorAll('button.call')) {
   button.dataset.busy = 'Calling…';
   button.addEventListener('click', () => {
     const li = button.closest('.tool');
+    const formMode = li.querySelector('.form-mode') && !li.querySelector('.json-mode:not([hidden])');
+    let argsString;
+    if (formMode) {
+      clearFieldErrors(li);
+      let collected;
+      try { collected = collectFormArgs(li); }
+      catch (e) {
+        const out = li.querySelector('.result');
+        out.hidden = false; out.textContent = '';
+        out.appendChild(note('result-error', 'Could not build arguments from the form — switch to JSON.'));
+        return;
+      }
+      if (collected.missing.length || collected.bad.length) {
+        markFieldErrors(li, collected.missing, collected.bad);
+        const out = li.querySelector('.result');
+        out.hidden = false; out.textContent = '';
+        out.appendChild(note('result-error', 'Fill the required field(s) first.'));
+        const first = li.querySelector('.field-row.invalid .field');
+        if (first) { first.focus(); }
+        return;
+      }
+      argsString = JSON.stringify(collected.args);
+    } else {
+      argsString = li.querySelector('textarea.args').value;
+    }
     startResult(li, button);
-    vscode.postMessage({ type: 'call', idx: li.dataset.idx, tool: li.dataset.tool, args: li.querySelector('textarea.args').value });
+    vscode.postMessage({ type: 'call', idx: li.dataset.idx, tool: li.dataset.tool, args: argsString });
+  });
+}
+for (const button of document.querySelectorAll('button.toggle')) {
+  button.addEventListener('click', () => {
+    const li = button.closest('.tool');
+    const form = li.querySelector('.form-mode');
+    const json = li.querySelector('.json-mode');
+    const textarea = li.querySelector('textarea.args');
+    if (json.hidden) {
+      clearFieldErrors(li);
+      let collected;
+      try { collected = collectFormArgs(li); } catch (e) { collected = { args: {} }; }
+      textarea.value = JSON.stringify(collected.args, null, 2);
+      form.hidden = true;
+      json.hidden = false;
+      li.dataset.mode = 'json';
+      button.textContent = 'Edit as form';
+    } else {
+      let parsed;
+      try { parsed = JSON.parse(textarea.value); }
+      catch (e) { toggleNote(li, "This JSON can't be shown as a form; staying in JSON mode."); return; }
+      if (!hydrateForm(li, parsed)) { toggleNote(li, "This JSON can't be shown as a form; staying in JSON mode."); return; }
+      json.hidden = true;
+      form.hidden = false;
+      li.dataset.mode = 'form';
+      button.textContent = 'Edit as JSON';
+    }
   });
 }
 for (const button of document.querySelectorAll('button.read')) {
@@ -544,15 +927,25 @@ dd { margin: 0; }
 .tool-desc { color: var(--vscode-descriptionForeground); margin: 4px 0; font-size: 0.9em; }
 .count { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 8px; padding: 0 8px; font-size: 0.75em; vertical-align: middle; }
 .call-row { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-textarea.args, input.uri, input.parg { width: 100%; box-sizing: border-box; font-family: var(--vscode-editor-font-family); font-size: 0.85em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; padding: 6px; }
-textarea.args { resize: vertical; }
+textarea.args, input.uri, input.parg, input.field:not([type="checkbox"]), select.field, textarea.field { width: 100%; box-sizing: border-box; font-family: var(--vscode-editor-font-family); font-size: 0.85em; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; padding: 6px; }
+textarea.args, textarea.field { resize: vertical; }
+input.field[type="checkbox"] { width: auto; }
+.fields { display: flex; flex-direction: column; gap: 8px; }
+.field-row { display: flex; flex-direction: column; gap: 2px; }
+.field-row.check { flex-direction: row; align-items: center; gap: 6px; }
+.field-name { font-size: 0.8em; color: var(--vscode-descriptionForeground); }
+.field-error { color: var(--vscode-errorForeground); font-size: 0.8em; margin-top: 2px; }
+.field-row.invalid .field { border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
 .pargs { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .parg-row { display: flex; flex-direction: column; gap: 2px; }
 .parg-name { font-size: 0.8em; color: var(--vscode-descriptionForeground); }
 .req { color: var(--vscode-errorForeground); }
+.actions { display: flex; gap: 8px; align-items: center; }
 button.call, button.read, button.get { align-self: flex-start; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; padding: 4px 14px; cursor: pointer; font-size: 0.85em; }
 button.call:hover, button.read:hover, button.get:hover { background: var(--vscode-button-hoverBackground); }
 button.call:disabled, button.read:disabled, button.get:disabled { opacity: 0.6; cursor: default; }
+button.toggle { background: transparent; color: var(--vscode-textLink-foreground); border: none; cursor: pointer; font-size: 0.8em; padding: 4px 6px; }
+button.toggle:hover { text-decoration: underline; }
 .result { margin-top: 10px; border-top: 1px solid var(--vscode-panel-border); padding-top: 8px; }
 .running { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
 .result-error { color: var(--vscode-errorForeground); font-weight: 600; margin-bottom: 6px; }

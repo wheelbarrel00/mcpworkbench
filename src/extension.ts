@@ -1,12 +1,20 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
-import { ServersProvider } from "./serversTree";
+import { ServersProvider, serverId } from "./serversTree";
 import { showTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
-import { DiscoveredServer } from "./types";
+import { probe } from "./mcpClient";
+import { HealthStore, recordFromProbe, rollup, statusBarSeverity, statusBarText, statusBarTooltip } from "./health";
+import { DiscoveredServer, ScannedFile } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
+
+const PROBE_TIMEOUT_MS = 10000;
+const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
+  error: "statusBarItem.errorBackground",
+  warning: "statusBarItem.warningBackground",
+};
 
 const HOME = os.homedir();
 const GLOBAL_WATCH_TARGETS: Array<{ dir: string; file: string }> = [
@@ -20,10 +28,31 @@ export function activate(context: vscode.ExtensionContext) {
 
   const provider = new ServersProvider();
   const diagnostics = new McpDiagnostics();
+  const health = new HealthStore(context.workspaceState);
+  provider.setHealthProvider((id) => health.get(id));
+
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBar.command = "mcpWorkbench.servers.focus";
+  const updateStatusBar = (files: ScannedFile[]) => {
+    const counts = rollup(files);
+    statusBar.text = statusBarText(counts);
+    statusBar.tooltip = statusBarTooltip(counts);
+    const severity = statusBarSeverity(counts);
+    statusBar.backgroundColor =
+      severity === "none" ? undefined : new vscode.ThemeColor(BACKGROUND_BY_SEVERITY[severity]);
+    statusBar.show();
+  };
+
+  const probing = new Set<string>();
 
   context.subscriptions.push(
     diagnostics,
-    provider.onDidScan((files) => void diagnostics.publish(files)),
+    statusBar,
+    provider.onDidScan((files) => {
+      void diagnostics.publish(files);
+      void health.prune(new Set(files.filter((f) => f.exists).flatMap((f) => f.servers.map(serverId))));
+      updateStatusBar(files);
+    }),
     vscode.window.registerTreeDataProvider("mcpWorkbench.servers", provider),
     vscode.commands.registerCommand("mcpWorkbench.refresh", () => provider.refresh()),
     vscode.commands.registerCommand("mcpWorkbench.openConfig", async (arg: unknown) => {
@@ -43,6 +72,36 @@ export function activate(context: vscode.ExtensionContext) {
         showTester(server).catch((e) =>
           vscode.window.showErrorMessage(`MCP Workbench: could not open the tester: ${errorText(e)}`),
         );
+      }
+    }),
+    vscode.commands.registerCommand("mcpWorkbench.testConnection", async (arg: unknown) => {
+      const server = resolveServer(arg);
+      if (!server) {
+        return;
+      }
+      const id = serverId(server);
+      if (probing.has(id)) {
+        return;
+      }
+      probing.add(id);
+      try {
+        const result = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `MCP Workbench: testing ${server.name}…` },
+          () => probe(server, PROBE_TIMEOUT_MS),
+        );
+        await health.set(id, recordFromProbe(result, Date.now()));
+        provider.redraw();
+        if (result.ok) {
+          const count = result.toolCount ?? 0;
+          const tools = `${count} ${count === 1 ? "tool" : "tools"}`;
+          vscode.window.showInformationMessage(
+            `MCP Workbench: ${server.name} responded in ${result.latencyMs}ms with ${tools}.`,
+          );
+        } else {
+          await showProbeError(server.name, result.error, result.detail);
+        }
+      } finally {
+        probing.delete(id);
       }
     }),
   );
@@ -92,6 +151,18 @@ export function deactivate() {}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+async function showProbeError(name: string, error?: string, detail?: string): Promise<void> {
+  const message = `MCP Workbench: ${name} did not respond — ${error ?? "unknown error"}`;
+  if (!detail) {
+    void vscode.window.showErrorMessage(message);
+    return;
+  }
+  const choice = await vscode.window.showErrorMessage(message, "Show details");
+  if (choice === "Show details") {
+    void vscode.window.showErrorMessage(`${name} — details`, { modal: true, detail });
+  }
 }
 
 function resolveServer(arg: unknown): DiscoveredServer | undefined {

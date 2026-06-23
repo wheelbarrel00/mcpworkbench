@@ -40,7 +40,7 @@ await build({
   logLevel: "silent",
 });
 
-const { ServersProvider } = require(bundlePath);
+const { ServersProvider, serverId } = require(bundlePath);
 
 function cursorWorkspace(servers) {
   const ws = mkTemp("mcpwb-ws-");
@@ -128,6 +128,48 @@ test("backticks and markdown metacharacters in a server name are escaped in the 
   const value = serverTooltip(path.join(process.env.USERPROFILE, "mcp.json"), "weird`*_name");
   assert.ok(value.includes("weird\\`"), "backtick should be backslash-escaped");
   assert.ok(value.includes("\\*"), "asterisk should be backslash-escaped");
+});
+
+function firstServerNode(p) {
+  for (const source of p.getChildren()) {
+    for (const child of p.getChildren(source)) {
+      if (child.kind === "server") {
+        return child;
+      }
+    }
+  }
+  return undefined;
+}
+
+test("a server tree node's id equals serverId(server) so health joins on the same key", () => {
+  const p = providerFor([cursorWorkspace({ alpha: { command: "node" } })]);
+  const node = firstServerNode(p);
+  assert.ok(node, "expected a server node");
+  assert.equal(node.id, serverId(node.server));
+});
+
+test("an ok health record decorates the server description with latency and tool count", () => {
+  const p = providerFor([cursorWorkspace({ alpha: { command: "node" } })]);
+  const node = firstServerNode(p);
+  p.setHealthProvider((id) =>
+    id === node.id ? { status: "ok", latencyMs: 42, toolCount: 3, checkedAt: 0 } : undefined,
+  );
+  const item = p.getTreeItem(node);
+  assert.match(item.description, /✓ 42ms · 3 tools/);
+  assert.match(item.description, /^stdio/);
+});
+
+test("an error health record marks the server unreachable", () => {
+  const p = providerFor([cursorWorkspace({ alpha: { command: "node" } })]);
+  const node = firstServerNode(p);
+  p.setHealthProvider(() => ({ status: "error", checkedAt: 0 }));
+  assert.match(p.getTreeItem(node).description, /✗ unreachable/);
+});
+
+test("without a health provider the server description is just the transport kind", () => {
+  const p = providerFor([cursorWorkspace({ alpha: { command: "node" } })]);
+  const node = firstServerNode(p);
+  assert.equal(p.getTreeItem(node).description, "stdio");
 });
 
 test("a forward-slash project path under home is shown with ~ and no username", () => {

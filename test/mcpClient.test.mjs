@@ -34,7 +34,7 @@ await build({
   logLevel: "silent",
 });
 
-const { createTransport, testServer, openSession } = require(bundlePath);
+const { createTransport, testServer, openSession, probe } = require(bundlePath);
 
 const echoServerPath = path.join(mkTemp("mcpwb-echo-"), "echo-server.cjs");
 await build({
@@ -143,6 +143,40 @@ test("openSession lists resources and prompts and can read and get them", { time
   }
 });
 
+test("probe reports a reachable server with its tool count and a non-negative latency", { timeout: 15000 }, async () => {
+  const server = {
+    name: "echo",
+    transport: { kind: "stdio", command: process.execPath, args: [echoServerPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await probe(server, 12000);
+  assert.equal(result.ok, true);
+  assert.ok(result.toolCount >= 1);
+  assert.equal(typeof result.latencyMs, "number");
+  assert.ok(result.latencyMs >= 0);
+});
+
+test("probe of an unlaunchable command fails without throwing and reports an error", { timeout: 10000 }, async () => {
+  const server = {
+    name: "broken",
+    transport: { kind: "stdio", command: "mcpwb-nonexistent-binary-zzz", args: [], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await probe(server, 5000);
+  assert.equal(result.ok, false);
+  assert.equal(typeof result.latencyMs, "number");
+  assert.equal(typeof result.error, "string");
+  assert.ok(result.error.length > 0);
+});
+
 test("a referenced env var that is not set fails with a clear error", async () => {
   delete process.env.MCPWB_MISSING_HEADER;
   const server = {
@@ -157,6 +191,22 @@ test("a referenced env var that is not set fails with a clear error", async () =
   const result = await testServer(server, 400);
   assert.equal(result.ok, false);
   assert.match(result.error, /MCPWB_MISSING_HEADER/);
+});
+
+test("a malformed remote URL fails with the plain error and no detail", async () => {
+  const server = {
+    name: "bad-url",
+    transport: { kind: "http", url: "not a url", headers: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Invalid URL/);
+  assert.equal(result.detail, undefined);
 });
 
 test("an SSE server that never sends endpoint times out instead of hanging", { timeout: 5000 }, async () => {

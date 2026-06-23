@@ -2,7 +2,7 @@
   "name": "mcp-workbench-wb00",
   "displayName": "MCP Workbench: Discover & Test",
   "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "icon": "media/logo.png",
   "publisher": "wheelbarrel00",
@@ -53,12 +53,21 @@
         "command": "mcpWorkbench.testServer",
         "title": "MCP Workbench: Test Server",
         "icon": "$(play)"
+      },
+      {
+        "command": "mcpWorkbench.testConnection",
+        "title": "MCP Workbench: Test Connection",
+        "icon": "$(plug)"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "mcpWorkbench.testServer",
+          "when": "false"
+        },
+        {
+          "command": "mcpWorkbench.testConnection",
           "when": "false"
         },
         {
@@ -75,9 +84,14 @@
       ],
       "view/item/context": [
         {
+          "command": "mcpWorkbench.testConnection",
+          "when": "viewItem == mcpServer",
+          "group": "inline@1"
+        },
+        {
           "command": "mcpWorkbench.testServer",
           "when": "viewItem == mcpServer",
-          "group": "inline"
+          "group": "inline@2"
         },
         {
           "command": "mcpWorkbench.openConfig",
@@ -104,7 +118,12 @@
           "markdownDescription": "Override the severity of individual security rules. Keys are rule ids; values are `off`, `info`, `warning`, or `error`. Example: `{ \"unpinned-launcher\": \"off\", \"hardcoded-secret\": \"error\" }`. Ids: `hardcoded-secret`, `credential-in-url`, `insecure-remote-transport`, `risky-shell-pipe`, `encoded-powershell`, `metadata-endpoint`, `unpinned-launcher`.",
           "additionalProperties": {
             "type": "string",
-            "enum": ["off", "info", "warning", "error"]
+            "enum": [
+              "off",
+              "info",
+              "warning",
+              "error"
+            ]
           }
         }
       }
@@ -123,6 +142,7 @@
     "@types/node": "^20.19.43",
     "@types/vscode": "^1.90.0",
     "esbuild": "^0.28.1",
+    "jsdom": "^29.1.1",
     "typescript": "^5.9.3"
   },
   "dependencies": {

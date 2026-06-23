@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import { discoverAll } from "./discovery";
+import { healthSuffix, type HealthRecord } from "./health";
 import { DiscoveredServer, McpSource, ScannedFile } from "./types";
 
 const HOME = os.homedir();
@@ -31,6 +32,15 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
   private _onDidScan = new vscode.EventEmitter<ScannedFile[]>();
   readonly onDidScan = this._onDidScan.event;
   private files: ScannedFile[] = [];
+  private healthLookup?: (id: string) => HealthRecord | undefined;
+
+  setHealthProvider(lookup: (id: string) => HealthRecord | undefined): void {
+    this.healthLookup = lookup;
+  }
+
+  redraw(): void {
+    this._onDidChange.fire();
+  }
 
   refresh(): void {
     const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
@@ -99,9 +109,11 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     const warnings = server.issues.filter((i) => i.level === "warning").length;
     const item = new vscode.TreeItem(server.name, vscode.TreeItemCollapsibleState.None);
     item.id = node.id;
-    item.description = server.scope
+    const base = server.scope
       ? `${server.transport.kind} · ${baseName(server.scope)}`
       : server.transport.kind;
+    const suffix = healthSuffix(this.healthLookup?.(node.id));
+    item.description = suffix ? `${base} · ${suffix}` : base;
     item.iconPath = new vscode.ThemeIcon(errors ? "error" : warnings ? "warning" : "pass");
     item.tooltip = new vscode.MarkdownString(
       [
@@ -122,7 +134,7 @@ function sourceLabel(file: ScannedFile, disambiguate: boolean): string {
   return disambiguate && file.workspaceFolder ? `${base} · ${baseName(file.workspaceFolder)}` : base;
 }
 
-function serverId(server: DiscoveredServer): string {
+export function serverId(server: DiscoveredServer): string {
   return `server|${server.source}|${server.configPath}|${server.scope ?? ""}|${server.name}`;
 }
 

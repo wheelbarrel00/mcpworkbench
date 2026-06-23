@@ -24,7 +24,8 @@ MCP server definitions end up scattered across half a dozen files with different
 - **Security & correctness checks** — flags hardcoded API keys, credentials in URLs, plaintext `http://` remotes, unpinned `npx`/`bunx` launchers, `curl | sh` bootstrap chains, and cloud-metadata endpoints, all from the config you already have.
 - **Problems-panel diagnostics** — every issue is published as a native VS Code diagnostic anchored to the exact key in the config file, so it shows up as a squiggle and in the Problems panel with click-to-jump.
 - **Connection testing** — launch any server over the MCP SDK, run the `initialize` handshake, and list its capabilities, tools, resources, and prompts (with input schemas) — or see the exact reason it failed to connect.
-- **Live tool calls, resource reads, and prompt fetches** — fire a real `tools/call` with arguments pre-filled from each tool's schema, read any resource (or fill in a template URI), and fetch a prompt's messages with its arguments — all against the live server, rendered inline.
+- **Per-server health** — a fast **Test Connection** records each server's handshake latency and tool count, shown inline in the tree, with a status-bar rollup of how many servers and issues were found across every source.
+- **Live tool calls, resource reads, and prompt fetches** — call any tool through a form generated from its input schema, with required-field validation and a Form/JSON toggle for advanced edits; read any resource (or fill in a template URI); and fetch a prompt's messages with its arguments — all against the live server, rendered inline.
 - **Provenance at a glance** — every server shows which file and editor it came from, with the absolute config path one click away.
 - **Live refresh** — re-scans automatically when any known MCP config changes in your workspace.
 
@@ -33,6 +34,20 @@ MCP server definitions end up scattered across half a dozen files with different
 Hover any server to see its source, the exact config file it came from, and every validation issue:
 
 ![Validation on hover](media/screenshots/validation-tooltip.png)
+
+### Per-server health
+
+Run a fast **Test Connection** on any server to record its handshake latency and tool count, shown inline in the tree — with a status-bar rollup of every server and issue found:
+
+![Health shown inline in the Servers tree](media/screenshots/server-health.png)
+
+![Test Connection result](media/screenshots/test-connection.png)
+
+### Tool, resource & prompt tester
+
+Open a server to call its tools through a form generated from each tool's input schema (or switch to raw JSON), read resources, and fetch prompts — live, with results rendered inline:
+
+![The tool tester](media/screenshots/tool-tester.png)
 
 ## Where it looks
 
@@ -100,7 +115,11 @@ Press **F5** to launch an Extension Development Host with MCP Workbench loaded, 
 
 - **Refresh** — re-scan all locations from the view's title bar.
 - **Open Config File** — right-click a server to jump to the exact file it came from.
-- **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, tools, resources, and prompts — or the exact connection error. The panel stays connected while open: edit a tool's JSON arguments and click **Call tool**, **Read** a resource (filling in any template variables), or **Get prompt** with its arguments to run against the live server, then close the panel to disconnect.
+- **Test Connection** — click the plug button on a server (or right-click → Test Connection) for a fast health check: it connects, times the handshake, and counts the tools without opening the full panel. The latency and tool count are cached and shown inline in the tree, and a rollup of every server and issue stays in the status bar.
+
+  ![The Test Connection button](media/screenshots/test-connection-button.png)
+
+- **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, tools, resources, and prompts — or the exact connection error. The panel stays connected while open: call a tool through a form generated from its schema (or switch to raw JSON), **Read** a resource (filling in any template variables), or **Get prompt** with its arguments to run against the live server, then close the panel to disconnect.
 
 ## Roadmap
 

@@ -4,6 +4,14 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-06-22
+
+### Added
+
+- Per-server health: a fast **Test Connection** command (the plug button on a server, or right-click → Test Connection) connects, times the `initialize` handshake, and counts the server's tools without opening the full panel. The latency and tool count are cached per server and shown inline in the tree.
+- Status-bar rollup: a status-bar item shows how many MCP servers and validation issues were found across every source, turns its background warning or error when issues exist, and clicks through to the Servers view.
+- Schema-driven tool argument forms in the Test Server panel: each tool's arguments render as a form generated from its input schema, with required-field validation and a Form/JSON toggle for advanced edits, falling back to a raw JSON box for schemas a form can't represent.
+
 ## [0.3.0] - 2026-06-21
 
 ### Added

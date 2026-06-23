@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.3.0";
+const CLIENT_VERSION = "0.4.0";
 
 export interface ToolSummary {
   name: string;
@@ -62,6 +62,14 @@ export interface TestFailure {
 
 export type TestResult = TestSuccess | TestFailure;
 
+export interface ProbeResult {
+  ok: boolean;
+  latencyMs: number;
+  toolCount?: number;
+  error?: string;
+  detail?: string;
+}
+
 export interface ToolCallSuccess {
   ok: true;
   isError: boolean;
@@ -102,14 +110,23 @@ export interface McpSession {
 
 export type SessionResult = { ok: true; session: McpSession } | TestFailure;
 
-export async function openSession(server: DiscoveredServer, timeoutMs = 20000): Promise<SessionResult> {
-  let transport;
-  try {
-    transport = createTransport(server);
-  } catch (e) {
-    return { ok: false, error: msg(e) };
+class ConnectError extends Error {
+  readonly detail?: string;
+  constructor(message: string, detail?: string) {
+    super(message);
+    this.detail = detail;
   }
+}
 
+interface Connection {
+  client: Client;
+  capabilities: ReturnType<Client["getServerCapabilities"]>;
+  stderrTail(): string;
+  close(): Promise<void>;
+}
+
+async function connect(server: DiscoveredServer, timeoutMs: number): Promise<Connection> {
+  const transport = createTransport(server);
   const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION }, { capabilities: {} });
   let stderr = "";
   try {
@@ -120,7 +137,37 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
       });
     }
     await withTimeout(connecting, timeoutMs, `Timed out after ${Math.round(timeoutMs / 1000)}s while connecting to the server.`);
-    const capabilities = client.getServerCapabilities();
+  } catch (e) {
+    try {
+      await client.close();
+    } catch {}
+    throw new ConnectError(msg(e), failureDetail(e, stderr));
+  }
+  return {
+    client,
+    capabilities: client.getServerCapabilities(),
+    stderrTail: () => stderr,
+    async close() {
+      try {
+        await client.close();
+      } catch {}
+    },
+  };
+}
+
+function connectFailure(e: unknown): TestFailure {
+  return { ok: false, error: msg(e), detail: e instanceof ConnectError ? e.detail : undefined };
+}
+
+export async function openSession(server: DiscoveredServer, timeoutMs = 20000): Promise<SessionResult> {
+  let connection: Connection;
+  try {
+    connection = await connect(server, timeoutMs);
+  } catch (e) {
+    return connectFailure(e);
+  }
+  const { client, capabilities } = connection;
+  try {
     const tools = capabilities?.tools
       ? (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary)
       : [];
@@ -160,7 +207,7 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
             structuredContent: res.structuredContent,
           };
         } catch (e) {
-          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+          return { ok: false, error: msg(e), detail: failureDetail(e, connection.stderrTail()) };
         }
       },
       async readResource(uri) {
@@ -168,7 +215,7 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
           const res = await client.readResource({ uri }, { timeout: timeoutMs });
           return { ok: true, contents: Array.isArray(res.contents) ? res.contents : [] };
         } catch (e) {
-          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+          return { ok: false, error: msg(e), detail: failureDetail(e, connection.stderrTail()) };
         }
       },
       async getPrompt(name, args) {
@@ -180,21 +227,39 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000): 
             messages: Array.isArray(res.messages) ? res.messages : [],
           };
         } catch (e) {
-          return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+          return { ok: false, error: msg(e), detail: failureDetail(e, connection.stderrTail()) };
         }
       },
       async dispose() {
-        try {
-          await client.close();
-        } catch {}
+        await connection.close();
       },
     };
     return { ok: true, session };
   } catch (e) {
-    try {
-      await client.close();
-    } catch {}
-    return { ok: false, error: msg(e), detail: failureDetail(e, stderr) };
+    await connection.close();
+    return { ok: false, error: msg(e), detail: failureDetail(e, connection.stderrTail()) };
+  }
+}
+
+export async function probe(server: DiscoveredServer, timeoutMs = 10000): Promise<ProbeResult> {
+  const started = Date.now();
+  let connection: Connection;
+  try {
+    connection = await connect(server, timeoutMs);
+  } catch (e) {
+    const failure = connectFailure(e);
+    return { ok: false, latencyMs: Date.now() - started, error: failure.error, detail: failure.detail };
+  }
+  const latencyMs = Date.now() - started;
+  try {
+    const toolCount = connection.capabilities?.tools
+      ? (await connection.client.listTools(undefined, { timeout: timeoutMs })).tools.length
+      : 0;
+    return { ok: true, latencyMs, toolCount };
+  } catch (e) {
+    return { ok: false, latencyMs, error: msg(e), detail: failureDetail(e, connection.stderrTail()) };
+  } finally {
+    await connection.close();
   }
 }
 
