@@ -43,6 +43,12 @@ Run a fast **Test Connection** on any server to record its handshake latency and
 
 ![Test Connection result](media/screenshots/test-connection.png)
 
+### Status-bar rollup
+
+An always-visible **MCP** item in the status bar rolls up every source at a glance — the total server count, plus a running tally of configuration and security issues. Hover for the full **N servers, X errors, Y warnings** breakdown, click to jump straight to the Servers view, and watch it turn yellow or red the moment a warning or error appears:
+
+![The status-bar rollup with its hover tooltip](media/screenshots/status-bar-rollup.png)
+
 ### Tool, resource & prompt tester
 
 Open a server to call its tools through a form generated from each tool's input schema (or switch to raw JSON), read resources, and fetch prompts — live, with results rendered inline:
