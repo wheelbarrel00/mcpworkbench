@@ -40,7 +40,7 @@ await build({
   logLevel: "silent",
 });
 
-const { ServersProvider, serverId } = require(bundlePath);
+const { ServersProvider, serverId, isWorkspaceScoped } = require(bundlePath);
 
 function cursorWorkspace(servers) {
   const ws = mkTemp("mcpwb-ws-");
@@ -183,6 +183,15 @@ function firstServerNode(p) {
   }
   return undefined;
 }
+
+test("only workspace-scoped sources are gated behind the launch confirmation", () => {
+  for (const source of ["cursor-workspace", "vscode-workspace", "claude-code-workspace"]) {
+    assert.equal(isWorkspaceScoped(source), true, `${source} is attacker-controllable via a cloned repo and must be gated`);
+  }
+  for (const source of ["cursor-global", "claude-code-user", "claude-desktop"]) {
+    assert.equal(isWorkspaceScoped(source), false, `${source} is a user/global machine config and stays frictionless`);
+  }
+});
 
 test("a server tree node's id equals serverId(server) so health joins on the same key", () => {
   const p = providerFor([cursorWorkspace({ alpha: { command: "node" } })]);

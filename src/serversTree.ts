@@ -21,6 +21,16 @@ const ISSUE_ICON: Record<"error" | "warning" | "info", string> = {
   info: "ℹ️",
 };
 
+const WORKSPACE_SOURCES: ReadonlySet<McpSource> = new Set<McpSource>([
+  "cursor-workspace",
+  "vscode-workspace",
+  "claude-code-workspace",
+]);
+
+export function isWorkspaceScoped(source: McpSource): boolean {
+  return WORKSPACE_SOURCES.has(source);
+}
+
 type Node = SourceNode | ServerNode | NoteNode;
 interface SourceNode { kind: "source"; label: string; file: ScannedFile; id: string; }
 interface ServerNode { kind: "server"; server: DiscoveredServer; id: string; }

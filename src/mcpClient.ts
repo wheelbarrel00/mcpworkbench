@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import { spawnSync } from "child_process";
+import { StringDecoder } from "string_decoder";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -8,7 +9,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.4.4";
+const CLIENT_VERSION = "0.4.5";
+const STDERR_CAP = 8192;
 
 export interface ToolSummary {
   name: string;
@@ -127,15 +129,20 @@ interface Connection {
   close(): Promise<void>;
 }
 
-async function connect(server: DiscoveredServer, timeoutMs: number): Promise<Connection> {
+async function connect(server: DiscoveredServer, timeoutMs: number, onClosed?: () => void): Promise<Connection> {
   const transport = createTransport(server);
   const client = new Client({ name: CLIENT_NAME, version: CLIENT_VERSION }, { capabilities: {} });
   let stderr = "";
+  let closing = false;
+  client.onerror = (e) => {
+    stderr = (stderr + `[protocol] ${msg(e)}\n`).slice(-STDERR_CAP);
+  };
   try {
     const connecting = client.connect(transport, { timeout: timeoutMs });
     if (transport instanceof StdioClientTransport && transport.stderr) {
+      const decoder = new StringDecoder("utf8");
       transport.stderr.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString();
+        stderr = (stderr + decoder.write(chunk)).slice(-STDERR_CAP);
       });
     }
     await withTimeout(connecting, timeoutMs, `Timed out after ${Math.round(timeoutMs / 1000)}s while connecting to the server.`);
@@ -145,11 +152,19 @@ async function connect(server: DiscoveredServer, timeoutMs: number): Promise<Con
     } catch {}
     throw new ConnectError(msg(e), failureDetail(e, stderr));
   }
+  if (onClosed) {
+    client.onclose = () => {
+      if (!closing) {
+        onClosed();
+      }
+    };
+  }
   return {
     client,
     capabilities: client.getServerCapabilities(),
     stderrTail: () => stderr,
     async close() {
+      closing = true;
       const pid = transport instanceof StdioClientTransport ? transport.pid : null;
       if (process.platform === "win32" && pid) {
         try {
@@ -167,10 +182,10 @@ function connectFailure(e: unknown): TestFailure {
   return { ok: false, error: msg(e), detail: e instanceof ConnectError ? e.detail : undefined };
 }
 
-export async function openSession(server: DiscoveredServer, timeoutMs = 20000): Promise<SessionResult> {
+export async function openSession(server: DiscoveredServer, timeoutMs = 20000, onClosed?: () => void): Promise<SessionResult> {
   let connection: Connection;
   try {
-    connection = await connect(server, timeoutMs);
+    connection = await connect(server, timeoutMs, onClosed);
   } catch (e) {
     return connectFailure(e);
   }

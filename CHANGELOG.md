@@ -4,6 +4,20 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-07-15
+
+### Security
+
+- Launching a server defined in a **workspace** config (`.mcp.json`, `.vscode/mcp.json`, `.cursor/mcp.json`) now asks for confirmation and shows the exact command before it runs, so opening a cloned repository can no longer execute a workspace-defined command on a single click. Servers from your user or global configs still launch without a prompt, and "Always allow in this workspace" suppresses the confirmation per workspace.
+
+### Fixed
+
+- `.mcp.json` and `~/.claude.json` are now validated as strict JSON: a trailing comma or comment is reported as an error, matching how Claude Code actually parses them, instead of showing as valid while the real client rejects the file. Editor configs that genuinely support comments (`.vscode` and `.cursor`) stay lenient.
+- The tester now notices when a server process exits mid-session — the status changes to disconnected and the action buttons disable — instead of continuing to show "Connected" until the next call fails.
+- Transport and protocol errors, such as a server printing a non-JSON line to stdout, now appear in the failure details instead of being silently swallowed.
+- A server's captured error output is now bounded and decoded correctly, so a long-running or noisy server no longer grows the extension's memory without limit, and multi-byte characters split across output chunks are no longer garbled in the error details.
+- Large tool, resource, and prompt results are now truncated before they are handed to the tester view, so an oversized response no longer risks stalling the extension.
+
 ## [0.4.4] - 2026-07-14
 
 ### Fixed

@@ -7,6 +7,32 @@ let panel: vscode.WebviewPanel | undefined;
 let session: McpSession | undefined;
 let seq = 0;
 
+const MAX_OUTPUT = 100000;
+const MAX_WIRE_TEXT = MAX_OUTPUT * 2;
+const MAX_BLOCKS = 100;
+const MAX_WIRE_DEPTH = 12;
+
+export function capForWire<T>(value: T): T {
+  return capValue(value, 0) as T;
+}
+
+function capValue(value: unknown, depth: number): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_WIRE_TEXT ? value.slice(0, MAX_WIRE_TEXT) : value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_BLOCKS).map((item) => capValue(item, depth + 1));
+  }
+  if (value && typeof value === "object" && depth < MAX_WIRE_DEPTH) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = capValue(item, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
 export async function showTester(server: DiscoveredServer): Promise<void> {
   if (!panel) {
     panel = vscode.window.createWebviewPanel(
@@ -31,7 +57,7 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
   panel.reveal(vscode.ViewColumn.Active);
   panel.webview.html = page(server.name, header(server, `<p class="status">Connecting…</p>`));
 
-  const opened = await openSession(server);
+  const opened = await openSession(server, undefined, () => handleClosed(myId));
   if (!panel || myId !== seq) {
     if (opened.ok) {
       await opened.session.dispose();
@@ -69,6 +95,14 @@ async function disposeSession(): Promise<void> {
   const current = session;
   session = undefined;
   await current.dispose();
+}
+
+function handleClosed(id: number): void {
+  if (id !== seq || !session || !panel) {
+    return;
+  }
+  session = undefined;
+  panel.webview.postMessage({ type: "disconnected" });
 }
 
 async function handleMessage(message: any): Promise<void> {
@@ -119,8 +153,8 @@ async function handleCall(current: McpSession, target: vscode.WebviewPanel, mess
       idx,
       ok: true,
       isError: result.isError,
-      blocks: result.content,
-      structured: result.structuredContent,
+      blocks: capForWire(result.content),
+      structured: capForWire(result.structuredContent),
     });
   } else {
     target.webview.postMessage({ type: "result", idx, ok: false, error: result.error, detail: result.detail });
@@ -139,7 +173,7 @@ async function handleRead(current: McpSession, target: vscode.WebviewPanel, mess
     return;
   }
   if (result.ok) {
-    target.webview.postMessage({ type: "readResult", ridx, ok: true, contents: result.contents });
+    target.webview.postMessage({ type: "readResult", ridx, ok: true, contents: capForWire(result.contents) });
   } else {
     target.webview.postMessage({ type: "readResult", ridx, ok: false, error: result.error, detail: result.detail });
   }
@@ -157,7 +191,7 @@ async function handleGetPrompt(current: McpSession, target: vscode.WebviewPanel,
     return;
   }
   if (result.ok) {
-    target.webview.postMessage({ type: "promptResult", pidx, ok: true, description: result.description, messages: result.messages });
+    target.webview.postMessage({ type: "promptResult", pidx, ok: true, description: result.description, messages: capForWire(result.messages) });
   } else {
     target.webview.postMessage({ type: "promptResult", pidx, ok: false, error: result.error, detail: result.detail });
   }
@@ -605,7 +639,7 @@ function page(titleName: string, content: string, scriptNonce?: string): string 
 
 export const SCRIPT = `
 const vscode = acquireVsCodeApi();
-const MAX_OUTPUT = 100000;
+const MAX_OUTPUT = ${MAX_OUTPUT};
 function pre(text) {
   const el = document.createElement('pre');
   el.textContent = text.length > MAX_OUTPUT ? text.slice(0, MAX_OUTPUT) + '  …(truncated, ' + text.length + ' characters)' : text;
@@ -854,6 +888,12 @@ for (const button of document.querySelectorAll('button.get')) {
 window.addEventListener('message', (event) => {
   const m = event.data;
   if (!m) { return; }
+  if (m.type === 'disconnected') {
+    const status = document.querySelector('.status');
+    if (status) { status.className = 'status fail'; status.textContent = '⚠ Server disconnected — reopen the tester to reconnect.'; }
+    for (const button of document.querySelectorAll('button.call, button.read, button.get')) { button.disabled = true; }
+    return;
+  }
   if (m.type === 'result') {
     const li = document.querySelector('.tool[data-idx="' + m.idx + '"]');
     if (!li) { return; }

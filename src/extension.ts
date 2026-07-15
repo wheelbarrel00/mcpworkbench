@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
 import { claudeDesktopConfigPath } from "./discovery";
-import { ServersProvider, serverId } from "./serversTree";
+import { ServersProvider, serverId, isWorkspaceScoped } from "./serversTree";
 import { showTester, disposeTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
 import { probe } from "./mcpClient";
@@ -13,6 +13,7 @@ const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
 
 const PROBE_TIMEOUT_MS = 10000;
 const REFRESH_DEBOUNCE_MS = 300;
+const TRUST_LAUNCH_KEY = "trustWorkspaceLaunch";
 const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
   error: "statusBarItem.errorBackground",
   warning: "statusBarItem.warningBackground",
@@ -71,17 +72,18 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`MCP Workbench: could not open ${server.configPath}: ${errorText(e)}`);
       }
     }),
-    vscode.commands.registerCommand("mcpWorkbench.testServer", (arg: unknown) => {
+    vscode.commands.registerCommand("mcpWorkbench.testServer", async (arg: unknown) => {
       const server = resolveServer(arg);
-      if (server) {
-        showTester(server).catch((e) =>
-          vscode.window.showErrorMessage(`MCP Workbench: could not open the tester: ${errorText(e)}`),
-        );
+      if (!server || !(await confirmLaunch(context, server))) {
+        return;
       }
+      showTester(server).catch((e) =>
+        vscode.window.showErrorMessage(`MCP Workbench: could not open the tester: ${errorText(e)}`),
+      );
     }),
     vscode.commands.registerCommand("mcpWorkbench.testConnection", async (arg: unknown) => {
       const server = resolveServer(arg);
-      if (!server) {
+      if (!server || !(await confirmLaunch(context, server))) {
         return;
       }
       const id = serverId(server);
@@ -165,6 +167,28 @@ export function deactivate() {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+function launchTarget(server: DiscoveredServer): string {
+  const t = server.transport;
+  return t.kind === "stdio" ? [t.command, ...t.args].join(" ").trim() : t.url;
+}
+
+async function confirmLaunch(context: vscode.ExtensionContext, server: DiscoveredServer): Promise<boolean> {
+  if (!isWorkspaceScoped(server.source) || context.workspaceState.get<boolean>(TRUST_LAUNCH_KEY)) {
+    return true;
+  }
+  const choice = await vscode.window.showWarningMessage(
+    `MCP Workbench: launch ${server.name} from this workspace?`,
+    { modal: true, detail: `This runs a command defined in the workspace config.\n\n${launchTarget(server)}` },
+    "Launch",
+    "Always allow in this workspace",
+  );
+  if (choice === "Always allow in this workspace") {
+    await context.workspaceState.update(TRUST_LAUNCH_KEY, true);
+    return true;
+  }
+  return choice === "Launch";
 }
 
 async function showProbeError(name: string, error?: string, detail?: string): Promise<void> {

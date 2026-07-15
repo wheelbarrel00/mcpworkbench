@@ -58,6 +58,17 @@ await build({
   logLevel: "silent",
 });
 
+const stderrServerPath = path.join(mkTemp("mcpwb-stderr-"), "stderr-server.cjs");
+await build({
+  entryPoints: [path.resolve("test/fixtures/stderr-server.mjs")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  target: "node18",
+  outfile: stderrServerPath,
+  logLevel: "silent",
+});
+
 function stdioServer(env) {
   return {
     name: "demo",
@@ -308,6 +319,91 @@ test("on Windows, disposing a session kills the whole process tree, not just the
   await opened.session.dispose();
 
   assert.equal(await waitUntilDead(grandchildPid, 8000), true, "grandchild must be killed by the process-tree teardown");
+});
+
+function stderrServer() {
+  return {
+    name: "stderr",
+    transport: { kind: "stdio", command: process.execPath, args: [stderrServerPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+}
+
+test("a multibyte stderr char split across chunks is decoded without corruption in the failure detail", { timeout: 15000 }, async () => {
+  const opened = await openSession(stderrServer(), 1500);
+  assert.equal(opened.ok, true);
+  try {
+    const result = await opened.session.callTool("hang", {});
+    assert.equal(result.ok, false);
+    assert.ok(result.detail, "a timed-out call should carry the stderr tail as detail");
+    assert.ok(result.detail.includes("€"), "the euro sign should be reassembled across chunk boundaries");
+    assert.equal(result.detail.includes("�"), false, "no replacement character should leak from split multibyte bytes");
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+function pidStubbornServer(pidFile) {
+  return {
+    name: "stubborn",
+    transport: { kind: "stdio", command: process.execPath, args: [stubbornServerPath], env: { MCPWB_PID_FILE: pidFile } },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+}
+
+test("onClosed fires exactly once when the server dies mid-session", { timeout: 20000 }, async () => {
+  const pidFile = path.join(mkTemp("mcpwb-onclose-"), "pid");
+  let closedCount = 0;
+  let signalClosed;
+  const closed = new Promise((resolve) => {
+    signalClosed = resolve;
+  });
+  const opened = await openSession(pidStubbornServer(pidFile), 12000, () => {
+    closedCount++;
+    signalClosed();
+  });
+  assert.equal(opened.ok, true);
+
+  const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  assert.ok(Number.isInteger(pid) && pid > 0);
+  process.kill(pid);
+
+  await Promise.race([
+    closed,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("onClosed never fired")), 8000)),
+  ]);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(closedCount, 1, "onClosed must fire once for an unexpected death");
+
+  await opened.session.dispose();
+});
+
+test("a deliberate dispose does not fire onClosed", { timeout: 15000 }, async () => {
+  const server = {
+    name: "echo",
+    transport: { kind: "stdio", command: process.execPath, args: [echoServerPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  let closedCount = 0;
+  const opened = await openSession(server, 12000, () => {
+    closedCount++;
+  });
+  assert.equal(opened.ok, true);
+  await opened.session.dispose();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(closedCount, 0, "the closing guard must suppress onClosed during a deliberate teardown");
 });
 
 test("probe reports a reachable server with its tool count and a non-negative latency", { timeout: 15000 }, async () => {

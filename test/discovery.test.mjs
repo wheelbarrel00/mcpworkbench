@@ -58,6 +58,14 @@ function scanCursorWorkspace(contents) {
   return scanned.find((f) => f.source === "cursor-workspace" && f.path === file);
 }
 
+function scanClaudeCodeWorkspace(contents) {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".mcp.json");
+  fs.writeFileSync(file, contents);
+  const scanned = discoverAll([ws]);
+  return scanned.find((f) => f.source === "claude-code-workspace" && f.path === file);
+}
+
 function hasIssue(issues, code) {
   return issues.some((i) => i.code === code);
 }
@@ -449,4 +457,28 @@ test("the Claude Desktop config path is undefined on Windows when APPDATA is uns
       if (savedAppData !== undefined) process.env.APPDATA = savedAppData;
     }
   });
+});
+
+test("a strict .mcp.json rejects a trailing comma that JSONC would tolerate", () => {
+  const file = scanClaudeCodeWorkspace('{ "mcpServers": { "fs": { "command": "node" } }, }');
+  assert.ok(file, "claude-code-workspace file should be scanned");
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), true, "the real client hard-rejects this, so the Workbench must too");
+});
+
+test("a strict .mcp.json rejects comments that JSONC would tolerate", () => {
+  const file = scanClaudeCodeWorkspace('{\n  // a comment\n  "mcpServers": { "fs": { "command": "node" } }\n}');
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), true);
+});
+
+test("a clean strict .mcp.json parses with its servers", () => {
+  const file = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { fs: { command: "node", args: [] } } }));
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), false);
+  assert.equal(file.servers.length, 1);
+  assert.equal(file.servers[0].name, "fs");
+});
+
+test("a lenient cursor mcp.json still tolerates comments and trailing commas", () => {
+  const file = scanCursorWorkspace('{\n  // still ok here\n  "mcpServers": { "fs": { "command": "node" } },\n}');
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), false);
+  assert.equal(file.servers.length, 1);
 });

@@ -18,6 +18,7 @@ interface ConfigLocation {
   resolve: (workspaceFolder?: string) => string | undefined;
   scoped: "global" | "workspace";
   includeProjects?: boolean;
+  strict?: boolean;
 }
 
 const home = os.homedir();
@@ -46,9 +47,9 @@ const LOCATIONS: ConfigLocation[] = [
   { source: "vscode-workspace", rootKey: "servers", scoped: "workspace",
     resolve: (ws) => (ws ? path.join(ws, ".vscode", "mcp.json") : undefined) },
 
-  { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace",
+  { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace", strict: true,
     resolve: (ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
-  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true,
+  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true, strict: true,
     resolve: () => path.join(home, ".claude.json") },
 
   { source: "claude-desktop", rootKey: "mcpServers", scoped: "global",
@@ -63,10 +64,10 @@ class JsonParseError extends Error {
   }
 }
 
-function parseLoose(text: string): unknown {
+function parseConfig(text: string, strict: boolean): unknown {
   const source = text.charCodeAt(0) === BYTE_ORDER_MARK ? text.slice(1) : text;
   const errors: ParseError[] = [];
-  const value = parseJsonc(source, errors, { allowTrailingComma: true });
+  const value = parseJsonc(source, errors, { allowTrailingComma: !strict, disallowComments: strict });
   if (errors.length > 0) {
     throw new JsonParseError(describeParseError(source, errors[0]), errors[0].offset);
   }
@@ -396,7 +397,7 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
 
   let parsed: any;
   try {
-    parsed = parseLoose(fs.readFileSync(p, "utf8"));
+    parsed = parseConfig(fs.readFileSync(p, "utf8"), loc.strict ?? false);
   } catch (e) {
     result.fileIssues.push({
       level: "error",
