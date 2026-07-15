@@ -56,6 +56,12 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
   );
 }
 
+export function disposeTester(): Promise<void> {
+  const teardown = disposeSession();
+  panel?.dispose();
+  return teardown;
+}
+
 async function disposeSession(): Promise<void> {
   if (!session) {
     return;

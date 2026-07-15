@@ -47,6 +47,17 @@ await build({
   logLevel: "silent",
 });
 
+const stubbornServerPath = path.join(mkTemp("mcpwb-stubborn-"), "stubborn-server.cjs");
+await build({
+  entryPoints: [path.resolve("test/fixtures/stubborn-server.mjs")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  target: "node18",
+  outfile: stubbornServerPath,
+  logLevel: "silent",
+});
+
 function stdioServer(env) {
   return {
     name: "demo",
@@ -72,6 +83,91 @@ test("unrelated process.env secrets and PATH are not forwarded by us", () => {
   assert.equal("MCPWB_SECRET" in passed, false);
   assert.equal("PATH" in passed, false);
   assert.deepEqual(passed, {});
+});
+
+test("editor variables expand across command, args, and env for the tester", () => {
+  const proj = mkTemp("mcpwb-proj-");
+  const server = {
+    name: "demo",
+    transport: {
+      kind: "stdio",
+      command: "${workspaceFolder}/bin/node",
+      args: ["${workspaceFolder}/server.js", "${userHome}/cfg"],
+      env: { WS: "${workspaceFolder}" },
+    },
+    projectDir: proj,
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const transport = createTransport(server);
+  assert.equal(transport._serverParams.command, proj + "/bin/node");
+  assert.deepEqual(transport._serverParams.args, [proj + "/server.js", os.homedir() + "/cfg"]);
+  assert.deepEqual(transport._serverParams.env, { WS: proj });
+});
+
+test("dollar sequences in the workspace path are substituted literally, not as replacement patterns", () => {
+  const proj = "C:/dev/a$$b$&c$`d$'e";
+  const server = {
+    name: "demo",
+    transport: { kind: "stdio", command: "${workspaceFolder}/node", args: ["${workspaceFolder}/server.js"], env: { WS: "${workspaceFolder}" } },
+    projectDir: proj,
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const transport = createTransport(server);
+  assert.equal(transport._serverParams.command, proj + "/node");
+  assert.deepEqual(transport._serverParams.args, [proj + "/server.js"]);
+  assert.deepEqual(transport._serverParams.env, { WS: proj });
+});
+
+test("${workspaceFolder} does not throw as an env var when no project dir is set", () => {
+  const server = {
+    name: "demo",
+    transport: { kind: "stdio", command: "node", args: ["${workspaceFolder}/x.js"], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const transport = createTransport(server);
+  assert.deepEqual(transport._serverParams.args, ["/x.js"]);
+});
+
+test("an env var name with parentheses expands in the command", () => {
+  process.env["MCPWB_PF(x86)"] = "C:/PF86";
+  const server = {
+    name: "demo",
+    transport: { kind: "stdio", command: "${MCPWB_PF(x86)}/app", args: [], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const transport = createTransport(server);
+  assert.equal(transport._serverParams.command, "C:/PF86/app");
+});
+
+test("editor variables expand inside a remote server url", () => {
+  process.env.MCPWB_HOST = "example.com";
+  const server = {
+    name: "demo",
+    transport: { kind: "http", url: "https://${MCPWB_HOST}/mcp", headers: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const transport = createTransport(server);
+  assert.equal(transport._url.href, "https://example.com/mcp");
 });
 
 test("the spawned server cwd defaults to an existing project dir", () => {
@@ -141,6 +237,77 @@ test("openSession lists resources and prompts and can read and get them", { time
   } finally {
     await opened.session.dispose();
   }
+});
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+async function waitUntilDead(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return !isAlive(pid);
+}
+
+test("disposing a session terminates a server that ignores stdin-EOF", { timeout: 20000 }, async () => {
+  const pidFile = path.join(mkTemp("mcpwb-pid-"), "pid");
+  const server = {
+    name: "stubborn",
+    transport: { kind: "stdio", command: process.execPath, args: [stubbornServerPath], env: { MCPWB_PID_FILE: pidFile } },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const opened = await openSession(server, 12000);
+  assert.equal(opened.ok, true);
+
+  const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  assert.ok(Number.isInteger(pid) && pid > 0);
+  assert.equal(isAlive(pid), true, "server child should be running before dispose");
+
+  await opened.session.dispose();
+
+  assert.equal(await waitUntilDead(pid, 8000), true, "server child must not be orphaned after dispose");
+});
+
+test("on Windows, disposing a session kills the whole process tree, not just the direct child", { timeout: 20000, skip: process.platform !== "win32" }, async () => {
+  const dir = mkTemp("mcpwb-tree-");
+  const pidFile = path.join(dir, "pid");
+  const childPidFile = path.join(dir, "child-pid");
+  const server = {
+    name: "tree",
+    transport: {
+      kind: "stdio",
+      command: process.execPath,
+      args: [stubbornServerPath],
+      env: { MCPWB_PID_FILE: pidFile, MCPWB_CHILD_PID_FILE: childPidFile },
+    },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const opened = await openSession(server, 12000);
+  assert.equal(opened.ok, true);
+
+  const grandchildPid = Number(fs.readFileSync(childPidFile, "utf8").trim());
+  assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
+  assert.equal(isAlive(grandchildPid), true, "grandchild should be running before dispose");
+
+  await opened.session.dispose();
+
+  assert.equal(await waitUntilDead(grandchildPid, 8000), true, "grandchild must be killed by the process-tree teardown");
 });
 
 test("probe reports a reachable server with its tool count and a non-negative latency", { timeout: 15000 }, async () => {

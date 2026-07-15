@@ -64,7 +64,7 @@ Open a server to call its tools through a form generated from each tool's input 
 | VS Code (workspace) | `<workspace>/.vscode/mcp.json` | `servers` |
 | Claude Code (workspace) | `<workspace>/.mcp.json` | `mcpServers` |
 | Claude Code (user) | `~/.claude.json` | `mcpServers` |
-| Claude Desktop | `~/.claude/claude_desktop_config.json` | `mcpServers` |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `~/.config/Claude/claude_desktop_config.json` (Linux) | `mcpServers` |
 
 Servers recorded per project under `projects["<path>"].mcpServers` in `~/.claude.json` are scoped to the open workspace folder by default. Set `mcpWorkbench.showAllClaudeProjects` to list every recorded project. Edits to the global config files above refresh the tree automatically.
 

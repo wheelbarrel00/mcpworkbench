@@ -4,6 +4,16 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-07-14
+
+### Fixed
+
+- Claude Desktop configs are now discovered at the correct per-OS location — `%APPDATA%\Claude` on Windows, `~/Library/Application Support/Claude` on macOS, `~/.config/Claude` on Linux — instead of a path that never existed, so Claude Desktop servers actually appear in the tree.
+- Testing a server no longer leaves an orphaned server process behind when the window reloads or the extension shuts down. On Windows the whole process tree is terminated, including the `npx`/`cmd.exe` launcher chain that the previous shutdown left running.
+- The Servers view no longer fails to render when a workspace folder is your home directory. Global and workspace configs that resolve to the same file now keep distinct tree nodes instead of colliding.
+- The tester now expands `${workspaceFolder}` and `${userHome}`, expands environment variables whose names contain parentheses such as `${ProgramFiles(x86)}`, and applies expansion to the launch command and remote URL — so a config that works in your editor works here too, instead of failing with a spurious "environment variable is not set" error. Valid `${workspaceFolder}` references are also no longer flagged as unset environment variables, and paths containing `$` are substituted literally.
+- Rapid successive edits to a config file now trigger a single tree refresh rather than a burst of rescans.
+
 ## [0.4.3] - 2026-06-29
 
 ### Changed

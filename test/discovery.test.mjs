@@ -37,7 +37,17 @@ await build({
   logLevel: "silent",
 });
 
-const { discoverAll } = require(bundlePath);
+const { discoverAll, claudeDesktopConfigPath } = require(bundlePath);
+
+function withPlatform(platform, fn) {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  try {
+    fn();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+}
 
 function scanCursorWorkspace(contents) {
   const ws = mkTemp("mcpwb-ws-");
@@ -181,6 +191,40 @@ test("a repeated unset env var reference is only flagged once", () => {
   );
   const unset = file.servers[0].issues.filter((i) => i.code === "env-unset");
   assert.equal(unset.length, 1);
+});
+
+test("editor variables like ${workspaceFolder} are not mistaken for unset env vars", () => {
+  const file = scanCursorWorkspace(
+    JSON.stringify({
+      mcpServers: {
+        x: { command: "node", env: { WS: "${workspaceFolder}", HOME_CFG: "${userHome}/.cfg" } },
+      },
+    })
+  );
+  assert.ok(file);
+  assert.equal(hasIssue(file.servers[0].issues, "env-unset"), false);
+});
+
+test("only exact-case, unprefixed editor variables are exempt from the unset-env check", () => {
+  delete process.env.workspacefolder;
+  const lower = scanCursorWorkspace(
+    JSON.stringify({ mcpServers: { x: { command: "node", env: { DIR: "${workspacefolder}" } } } })
+  );
+  assert.equal(hasIssue(lower.servers[0].issues, "env-unset"), true, "a lowercase ${workspacefolder} is a real env ref, not an editor variable");
+
+  const prefixed = scanCursorWorkspace(
+    JSON.stringify({ mcpServers: { x: { command: "node", env: { DIR: "${env:workspaceFolder}" } } } })
+  );
+  assert.equal(hasIssue(prefixed.servers[0].issues, "env-unset"), true, "${env:workspaceFolder} explicitly asks for an env var");
+});
+
+test("an env var name containing parentheses is recognized", () => {
+  delete process.env["MCPWB_PARENS(x86)"];
+  const file = scanCursorWorkspace(
+    JSON.stringify({ mcpServers: { x: { command: "node", env: { P: "${MCPWB_PARENS(x86)}" } } } })
+  );
+  const issue = file.servers[0].issues.find((i) => i.code === "env-unset");
+  assert.ok(issue, "a parenthesized env var reference should be parsed and, when unset, flagged");
 });
 
 test("claude-code-user projects filter to the open workspace unless showAll is set", () => {
@@ -361,4 +405,48 @@ test("ruleSeverity does not affect non-security checks", () => {
     { ruleSeverity: { "env-unset": "off" } },
   );
   assert.equal(hasIssue(file.servers[0].issues, "env-unset"), true);
+});
+
+test("the Claude Desktop config path resolves to the per-OS application-support location", () => {
+  const home = process.env.USERPROFILE;
+
+  withPlatform("win32", () => {
+    const savedAppData = process.env.APPDATA;
+    process.env.APPDATA = path.join(home, "AppData", "Roaming");
+    try {
+      assert.equal(
+        claudeDesktopConfigPath(),
+        path.join(process.env.APPDATA, "Claude", "claude_desktop_config.json"),
+      );
+    } finally {
+      if (savedAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = savedAppData;
+    }
+  });
+
+  withPlatform("darwin", () => {
+    assert.equal(
+      claudeDesktopConfigPath(),
+      path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"),
+    );
+  });
+
+  withPlatform("linux", () => {
+    assert.equal(
+      claudeDesktopConfigPath(),
+      path.join(home, ".config", "Claude", "claude_desktop_config.json"),
+    );
+  });
+});
+
+test("the Claude Desktop config path is undefined on Windows when APPDATA is unset", () => {
+  withPlatform("win32", () => {
+    const savedAppData = process.env.APPDATA;
+    delete process.env.APPDATA;
+    try {
+      assert.equal(claudeDesktopConfigPath(), undefined);
+    } finally {
+      if (savedAppData !== undefined) process.env.APPDATA = savedAppData;
+    }
+  });
 });

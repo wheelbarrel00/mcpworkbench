@@ -1,4 +1,6 @@
 import * as fs from "fs";
+import * as os from "os";
+import { spawnSync } from "child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -6,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.4.0";
+const CLIENT_VERSION = "0.4.4";
 
 export interface ToolSummary {
   name: string;
@@ -148,6 +150,12 @@ async function connect(server: DiscoveredServer, timeoutMs: number): Promise<Con
     capabilities: client.getServerCapabilities(),
     stderrTail: () => stderr,
     async close() {
+      const pid = transport instanceof StdioClientTransport ? transport.pid : null;
+      if (process.platform === "win32" && pid) {
+        try {
+          spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+        } catch {}
+      }
       try {
         await client.close();
       } catch {}
@@ -277,23 +285,30 @@ export async function testServer(server: DiscoveredServer, timeoutMs = 20000): P
 
 export function createTransport(server: DiscoveredServer) {
   const t = server.transport;
+  const substitute = (value: string) => expandEnv(replaceEditorVariables(value, server.projectDir));
   if (t.kind === "stdio") {
     if (!t.command.trim()) {
       throw new Error("This server has no command to launch.");
     }
     return new StdioClientTransport({
-      command: t.command,
-      args: t.args.map(expandEnv),
-      env: mapValues(t.env, expandEnv),
+      command: substitute(t.command),
+      args: t.args.map(substitute),
+      env: mapValues(t.env, substitute),
       cwd: resolveCwd(server.projectDir),
       stderr: "pipe",
     });
   }
-  const url = new URL(t.url);
-  const requestInit = { headers: mapValues(t.headers, expandEnv) };
+  const url = new URL(substitute(t.url));
+  const requestInit = { headers: mapValues(t.headers, substitute) };
   return t.kind === "sse"
     ? new SSEClientTransport(url, { requestInit })
     : new StreamableHTTPClientTransport(url, { requestInit });
+}
+
+function replaceEditorVariables(value: string, projectDir: string | undefined): string {
+  return value
+    .replace(/\$\{workspaceFolder\}/g, () => projectDir ?? "")
+    .replace(/\$\{userHome\}/g, () => os.homedir());
 }
 
 function resolveCwd(dir: string | undefined): string | undefined {
@@ -308,7 +323,7 @@ function resolveCwd(dir: string | undefined): string | undefined {
 }
 
 function expandEnv(value: string): string {
-  return value.replace(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi, (_whole, name: string) => {
+  return value.replace(/\$\{(?:env:)?([A-Z0-9_()]+)\}/gi, (_whole, name: string) => {
     const resolved = process.env[name];
     if (resolved === undefined) {
       throw new Error(`Environment variable ${name} is referenced but not set.`);

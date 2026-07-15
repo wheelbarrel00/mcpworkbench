@@ -95,6 +95,49 @@ test("duplicate-named servers across folders still get unique tree ids", () => {
   assert.equal(ids.length, new Set(ids).size, "ids must be unique: " + JSON.stringify(ids));
 });
 
+function allDescendantIds(p) {
+  const ids = [];
+  for (const root of p.getChildren()) {
+    ids.push(p.getTreeItem(root).id);
+    for (const child of p.getChildren(root)) {
+      ids.push(p.getTreeItem(child).id);
+    }
+  }
+  return ids;
+}
+
+test("a workspace that IS the home dir keeps global and workspace source ids distinct", () => {
+  const home = process.env.USERPROFILE;
+  const file = path.join(home, ".cursor", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { shared: { command: "node" } } }));
+  try {
+    const p = providerFor([home]);
+    const cursorNodes = p.getChildren().filter((n) => n.kind === "source" && n.file.path === file);
+    assert.equal(cursorNodes.length, 2, "both cursor-global and cursor-workspace should resolve to this path");
+    const ids = cursorNodes.map((n) => p.getTreeItem(n).id);
+    assert.equal(new Set(ids).size, 2, "same-path nodes must still have distinct ids: " + JSON.stringify(ids));
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
+test("home-dir-as-workspace with an empty config keeps note and empty-state child ids distinct", () => {
+  const home = process.env.USERPROFILE;
+  const file = path.join(home, ".cursor", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: {} }));
+  try {
+    const p = providerFor([home]);
+    const sameFileNodes = p.getChildren().filter((n) => n.kind === "source" && n.file.path === file);
+    assert.equal(sameFileNodes.length, 2, "an empty config at home==workspace should still yield two source nodes");
+    const ids = allDescendantIds(p);
+    assert.equal(ids.length, new Set(ids).size, "note/empty child ids must be unique across sources: " + JSON.stringify(ids));
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+});
+
 test("single-root keeps the plain source label", () => {
   const sources = cursorSources(providerFor([cursorWorkspace({ alpha: { command: "node" } })]));
   assert.equal(sources.length, 1);

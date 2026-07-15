@@ -63,7 +63,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
       return existing.map((file) => ({
         kind: "source",
         file,
-        id: `source|${file.path}`,
+        id: `source|${file.source}|${file.path}`,
         label: sourceLabel(file, (perSource.get(file.source) ?? 0) > 1),
       }));
     }
@@ -77,12 +77,12 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
         kind: "note",
         text: issue.message,
         level: issue.level,
-        id: `note|${node.file.path}|${i}`,
+        id: `note|${node.file.source}|${node.file.path}|${i}`,
       }));
       const children = [...servers, ...issues];
       return children.length
         ? children
-        : [{ kind: "note", text: "No servers found", level: "info", id: `empty|${node.file.path}` }];
+        : [{ kind: "note", text: "No servers found", level: "info", id: `empty|${node.file.source}|${node.file.path}` }];
     }
     return [];
   }

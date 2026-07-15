@@ -1,8 +1,9 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
+import { claudeDesktopConfigPath } from "./discovery";
 import { ServersProvider, serverId } from "./serversTree";
-import { showTester } from "./testPanel";
+import { showTester, disposeTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
 import { probe } from "./mcpClient";
 import { HealthStore, recordFromProbe, rollup, statusBarSeverity, statusBarText, statusBarTooltip } from "./health";
@@ -11,16 +12,20 @@ import { DiscoveredServer, ScannedFile } from "./types";
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
 
 const PROBE_TIMEOUT_MS = 10000;
+const REFRESH_DEBOUNCE_MS = 300;
 const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
   error: "statusBarItem.errorBackground",
   warning: "statusBarItem.warningBackground",
 };
 
 const HOME = os.homedir();
+const claudeDesktopConfig = claudeDesktopConfigPath();
 const GLOBAL_WATCH_TARGETS: Array<{ dir: string; file: string }> = [
   { dir: HOME, file: ".claude.json" },
   { dir: path.join(HOME, ".cursor"), file: "mcp.json" },
-  { dir: path.join(HOME, ".claude"), file: "claude_desktop_config.json" },
+  ...(claudeDesktopConfig
+    ? [{ dir: path.dirname(claudeDesktopConfig), file: path.basename(claudeDesktopConfig) }]
+    : []),
 ];
 
 export function activate(context: vscode.ExtensionContext) {
@@ -106,6 +111,13 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  const refreshSoon = () => {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => provider.refresh(), REFRESH_DEBOUNCE_MS);
+  };
+  context.subscriptions.push({ dispose: () => clearTimeout(refreshTimer) });
+
   let watcher: vscode.FileSystemWatcher | undefined;
   const syncWatcher = () => {
     watcher?.dispose();
@@ -114,9 +126,9 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
     watcher = vscode.workspace.createFileSystemWatcher(WATCH_GLOB);
-    watcher.onDidChange(() => provider.refresh());
-    watcher.onDidCreate(() => provider.refresh());
-    watcher.onDidDelete(() => provider.refresh());
+    watcher.onDidChange(refreshSoon);
+    watcher.onDidCreate(refreshSoon);
+    watcher.onDidDelete(refreshSoon);
   };
 
   context.subscriptions.push(
@@ -129,9 +141,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   for (const { dir, file } of GLOBAL_WATCH_TARGETS) {
     const globalWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dir, file));
-    globalWatcher.onDidChange(() => provider.refresh());
-    globalWatcher.onDidCreate(() => provider.refresh());
-    globalWatcher.onDidDelete(() => provider.refresh());
+    globalWatcher.onDidChange(refreshSoon);
+    globalWatcher.onDidCreate(refreshSoon);
+    globalWatcher.onDidDelete(refreshSoon);
     context.subscriptions.push(globalWatcher);
   }
 
@@ -147,7 +159,9 @@ export function activate(context: vscode.ExtensionContext) {
   provider.refresh();
 }
 
-export function deactivate() {}
+export function deactivate() {
+  return disposeTester();
+}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);

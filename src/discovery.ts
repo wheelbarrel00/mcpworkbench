@@ -22,6 +22,21 @@ interface ConfigLocation {
 
 const home = os.homedir();
 
+const ENV_REFERENCE = /\$\{(env:)?([A-Z0-9_()]+)\}/gi;
+const EDITOR_VARIABLE_NAMES = new Set(["workspaceFolder", "userHome"]);
+
+export function claudeDesktopConfigPath(): string | undefined {
+  if (process.platform === "win32") {
+    return process.env.APPDATA
+      ? path.join(process.env.APPDATA, "Claude", "claude_desktop_config.json")
+      : undefined;
+  }
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  }
+  return path.join(home, ".config", "Claude", "claude_desktop_config.json");
+}
+
 const LOCATIONS: ConfigLocation[] = [
   { source: "cursor-global", rootKey: "mcpServers", scoped: "global",
     resolve: () => path.join(home, ".cursor", "mcp.json") },
@@ -37,7 +52,7 @@ const LOCATIONS: ConfigLocation[] = [
     resolve: () => path.join(home, ".claude.json") },
 
   { source: "claude-desktop", rootKey: "mcpServers", scoped: "global",
-    resolve: () => path.join(home, ".claude", "claude_desktop_config.json") },
+    resolve: () => claudeDesktopConfigPath() },
 ];
 
 const BYTE_ORDER_MARK = 0xfeff;
@@ -282,8 +297,12 @@ function missingEnvIssues(obj: Record<string, string>, basePath: JsonPath): Conf
   const issues: ConfigIssue[] = [];
   const seen = new Set<string>();
   for (const [key, value] of Object.entries(obj)) {
-    for (const m of value.matchAll(/\$\{(?:env:)?([A-Z0-9_]+)\}/gi)) {
-      const name = m[1];
+    for (const m of value.matchAll(ENV_REFERENCE)) {
+      const prefixed = m[1] !== undefined;
+      const name = m[2];
+      if (!prefixed && EDITOR_VARIABLE_NAMES.has(name)) {
+        continue;
+      }
       if (process.env[name] === undefined && !seen.has(name)) {
         seen.add(name);
         issues.push({
