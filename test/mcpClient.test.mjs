@@ -69,6 +69,36 @@ await build({
   logLevel: "silent",
 });
 
+async function buildFixture(name) {
+  const outfile = path.join(mkTemp(`mcpwb-${name}-`), `${name}.cjs`);
+  await build({
+    entryPoints: [path.resolve(`test/fixtures/${name}.mjs`)],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    target: "node18",
+    outfile,
+    logLevel: "silent",
+  });
+  return outfile;
+}
+
+const toolsErrorServerPath = await buildFixture("tools-error-server");
+const barrierServerPath = await buildFixture("barrier-server");
+const progressServerPath = await buildFixture("progress-server");
+
+function stdioTarget(name, serverPath) {
+  return {
+    name,
+    transport: { kind: "stdio", command: process.execPath, args: [serverPath], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+}
+
 function stdioServer(env) {
   return {
     name: "demo",
@@ -438,6 +468,181 @@ test("probe of an unlaunchable command fails without throwing and reports an err
   assert.equal(typeof result.latencyMs, "number");
   assert.equal(typeof result.error, "string");
   assert.ok(result.error.length > 0);
+});
+
+test("an unlaunchable command surfaces a PATH hint in the failure detail", { timeout: 10000 }, async () => {
+  const server = {
+    name: "broken",
+    transport: { kind: "stdio", command: "mcpwb-nonexistent-binary-zzz", args: [], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await testServer(server, 5000);
+  assert.equal(result.ok, false);
+  assert.ok(result.detail, "an ENOENT failure should carry a detail");
+  assert.match(result.detail, /PATH/);
+});
+
+test("post-connect list calls run concurrently rather than sequentially", { timeout: 12000 }, async () => {
+  const start = Date.now();
+  const opened = await openSession(stdioTarget("barrier", barrierServerPath), 4000);
+  const elapsed = Date.now() - start;
+  assert.equal(opened.ok, true);
+  assert.ok(elapsed < 2500, `expected concurrent list calls, but openSession took ${elapsed}ms`);
+  await opened.session.dispose();
+});
+
+test("a failing tools/list yields an empty tool list instead of failing the whole session", { timeout: 8000 }, async () => {
+  const opened = await openSession(stdioTarget("tools-error", toolsErrorServerPath), 2000);
+  assert.equal(opened.ok, true);
+  assert.deepEqual(opened.session.info.tools, []);
+  await opened.session.dispose();
+});
+
+test("a long tool call that reports progress is not killed by the base timeout", { timeout: 10000 }, async () => {
+  const opened = await openSession(stdioTarget("progress", progressServerPath), 1000);
+  assert.equal(opened.ok, true);
+  try {
+    const result = await opened.session.callTool("slow", {});
+    assert.equal(result.ok, true);
+    const text = result.content.map((b) => (b && b.type === "text" ? b.text : "")).join("");
+    assert.equal(text, "done");
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("disposing a Streamable HTTP session sends a DELETE to terminate it server-side", { timeout: 8000 }, async () => {
+  let deletedSession = null;
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === "DELETE") {
+      deletedSession = req.headers["mcp-session-id"] ?? null;
+      res.writeHead(200).end();
+      return;
+    }
+    if (req.method === "GET") {
+      res.writeHead(405).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let message;
+      try {
+        message = JSON.parse(body);
+      } catch {
+        res.writeHead(202).end();
+        return;
+      }
+      if (message.method === "initialize") {
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sess-xyz" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: message.params.protocolVersion, capabilities: {}, serverInfo: { name: "http-fixture", version: "0.0.1" } },
+        }));
+        return;
+      }
+      res.writeHead(202).end();
+    });
+  });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = httpServer.address();
+    const server = {
+      name: "http-term",
+      transport: { kind: "http", url: `http://127.0.0.1:${port}/mcp`, headers: {} },
+      source: "cursor-workspace",
+      configPath: path.join(os.tmpdir(), "mcp.json"),
+      rootKey: "mcpServers",
+      raw: {},
+      issues: [],
+    };
+    const opened = await openSession(server, 3000);
+    assert.equal(opened.ok, true);
+    await opened.session.dispose();
+    assert.equal(deletedSession, "sess-xyz");
+  } finally {
+    httpServer.close();
+  }
+});
+
+test("a hung HTTP session-terminate does not block teardown", { timeout: 15000 }, async () => {
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === "DELETE") {
+      return;
+    }
+    if (req.method === "GET") {
+      res.writeHead(405).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      let message;
+      try {
+        message = JSON.parse(body);
+      } catch {
+        res.writeHead(202).end();
+        return;
+      }
+      if (message.method === "initialize") {
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "sess-hang" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: message.params.protocolVersion, capabilities: {}, serverInfo: { name: "hang-fixture", version: "0.0.1" } },
+        }));
+        return;
+      }
+      res.writeHead(202).end();
+    });
+  });
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = httpServer.address();
+    const server = {
+      name: "http-hang",
+      transport: { kind: "http", url: `http://127.0.0.1:${port}/mcp`, headers: {} },
+      source: "cursor-workspace",
+      configPath: path.join(os.tmpdir(), "mcp.json"),
+      rootKey: "mcpServers",
+      raw: {},
+      issues: [],
+    };
+    const opened = await openSession(server, 1000);
+    assert.equal(opened.ok, true);
+    const start = Date.now();
+    await opened.session.dispose();
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 4000, `teardown should be bounded despite a hung DELETE, took ${elapsed}ms`);
+  } finally {
+    httpServer.closeAllConnections?.();
+    httpServer.close();
+  }
+});
+
+test("a server's own missing-child ENOENT does not trigger the launcher PATH hint", { timeout: 10000 }, async () => {
+  const scriptDir = mkTemp("mcpwb-childenoent-");
+  const script = path.join(scriptDir, "child-enoent.cjs");
+  fs.writeFileSync(script, "process.stderr.write('Error: spawn nonexistent-child-tool ENOENT\\n');\nsetTimeout(() => process.exit(1), 100);\n");
+  const server = {
+    name: "innocent-launcher",
+    transport: { kind: "stdio", command: process.execPath, args: [script], env: {} },
+    source: "cursor-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "mcpServers",
+    raw: {},
+    issues: [],
+  };
+  const result = await testServer(server, 3000);
+  assert.equal(result.ok, false);
+  assert.ok(result.detail, "the failure should carry the server's stderr");
+  assert.match(result.detail, /spawn nonexistent-child-tool ENOENT/);
+  assert.doesNotMatch(result.detail, /could not be found on this editor's PATH/);
 });
 
 test("a referenced env var that is not set fails with a clear error", async () => {

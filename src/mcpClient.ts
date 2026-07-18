@@ -9,8 +9,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.4.5";
+const CLIENT_VERSION = "0.4.6";
 const STDERR_CAP = 8192;
+const CALL_TOOL_MAX_TIMEOUT = 300000;
+const TERMINATE_TIMEOUT = 5000;
 
 export interface ToolSummary {
   name: string;
@@ -171,6 +173,11 @@ async function connect(server: DiscoveredServer, timeoutMs: number, onClosed?: (
           spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
         } catch {}
       }
+      if (transport instanceof StreamableHTTPClientTransport) {
+        try {
+          await withTimeout(transport.terminateSession(), Math.min(timeoutMs, TERMINATE_TIMEOUT), "Timed out terminating the HTTP session.");
+        } catch {}
+      }
       try {
         await client.close();
       } catch {}
@@ -191,18 +198,20 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000, o
   }
   const { client, capabilities } = connection;
   try {
-    const tools = capabilities?.tools
-      ? (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary)
-      : [];
-    const resources = capabilities?.resources
-      ? await safeList(async () => (await client.listResources(undefined, { timeout: timeoutMs })).resources.map(toResourceSummary))
-      : [];
-    const resourceTemplates = capabilities?.resources
-      ? await safeList(async () => (await client.listResourceTemplates(undefined, { timeout: timeoutMs })).resourceTemplates.map(toResourceTemplateSummary))
-      : [];
-    const prompts = capabilities?.prompts
-      ? await safeList(async () => (await client.listPrompts(undefined, { timeout: timeoutMs })).prompts.map(toPromptSummary))
-      : [];
+    const [tools, resources, resourceTemplates, prompts] = await Promise.all([
+      capabilities?.tools
+        ? safeList(async () => (await client.listTools(undefined, { timeout: timeoutMs })).tools.map(toSummary))
+        : Promise.resolve([] as ToolSummary[]),
+      capabilities?.resources
+        ? safeList(async () => (await client.listResources(undefined, { timeout: timeoutMs })).resources.map(toResourceSummary))
+        : Promise.resolve([] as ResourceSummary[]),
+      capabilities?.resources
+        ? safeList(async () => (await client.listResourceTemplates(undefined, { timeout: timeoutMs })).resourceTemplates.map(toResourceTemplateSummary))
+        : Promise.resolve([] as ResourceTemplateSummary[]),
+      capabilities?.prompts
+        ? safeList(async () => (await client.listPrompts(undefined, { timeout: timeoutMs })).prompts.map(toPromptSummary))
+        : Promise.resolve([] as PromptSummary[]),
+    ]);
     const serverInfo = client.getServerVersion();
     const info: TestSuccess = {
       ok: true,
@@ -221,7 +230,7 @@ export async function openSession(server: DiscoveredServer, timeoutMs = 20000, o
           const res = await client.callTool(
             { name, arguments: (args ?? {}) as Record<string, unknown> },
             undefined,
-            { timeout: timeoutMs },
+            { timeout: timeoutMs, resetTimeoutOnProgress: true, maxTotalTimeout: CALL_TOOL_MAX_TIMEOUT, onprogress: () => {} },
           );
           return {
             ok: true,
@@ -398,11 +407,14 @@ function msg(e: unknown): string {
 
 function failureDetail(e: unknown, stderr: string): string | undefined {
   const parts: string[] = [];
-  if (e instanceof Error) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code) {
-      parts.push(String(code));
-    }
+  const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+  if (code) {
+    parts.push(String(code));
+  }
+  if (code === "ENOENT" || /\[protocol\][^\n]*\bspawn\b[^\n]*\bENOENT\b/i.test(stderr)) {
+    parts.push(
+      "The command could not be found on this editor's PATH. Editors launched from the GUI don't inherit your shell's PATH, so a bare launcher like \"npx\" or \"node\" can fail here even though it works in a terminal. Point the config at an absolute path to the executable.",
+    );
   }
   const tail = stderr.trim();
   if (tail) {

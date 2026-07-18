@@ -95,7 +95,7 @@ function normalizeTransport(entry: any): {
     if (!entry.command.trim()) {
       issues.push({ level: "error", code: "empty-command", message: "stdio server has an empty command.", path: ["command"] });
     }
-    if (/(^|\/)npx$/.test(entry.command) && !args.includes("-y") && !args.includes("--yes")) {
+    if (baseCommandName(entry.command) === "npx" && !args.includes("-y") && !args.includes("--yes")) {
       issues.push({
         level: "warning",
         code: "npx-missing-y",
@@ -218,7 +218,10 @@ function isEncodedPowerShell(command: string, args: string[]): boolean {
 
 const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "Anthropic API key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
+  { name: "OpenAI project key", re: /\bsk-proj-[A-Za-z0-9_-]{20,}/ },
+  { name: "OpenAI service account key", re: /\bsk-svcacct-[A-Za-z0-9_-]{20,}/ },
   { name: "OpenAI API key", re: /\bsk-[A-Za-z0-9]{20,}/ },
+  { name: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{20,}/ },
   { name: "GitHub token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}/ },
   { name: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
   { name: "AWS access key", re: /\bAKIA[0-9A-Z]{16}\b/ },
@@ -254,7 +257,7 @@ function urlIssues(rawUrl: string): ConfigIssue[] {
   } catch {
     return issues;
   }
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
 
   if (url.protocol === "http:" && !isLocal) {
@@ -273,7 +276,8 @@ function urlIssues(rawUrl: string): ConfigIssue[] {
       path: ["url"],
     });
   } else {
-    const param = SENSITIVE_URL_PARAMS.find((p) => url.searchParams.has(p));
+    const paramKeys = new Set([...url.searchParams.keys()].map((k) => k.toLowerCase()));
+    const param = SENSITIVE_URL_PARAMS.find((p) => paramKeys.has(p));
     if (param) {
       issues.push({
         level: "warning",

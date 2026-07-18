@@ -4,6 +4,24 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-07-17
+
+### Security
+
+- The hardcoded-secret check now recognizes modern OpenAI project and service-account keys (`sk-proj-`, `sk-svcacct-`) and GitHub fine-grained tokens (`github_pat_`), so a literal key of one of these formats in a config is flagged instead of passing silently.
+- Credentials in a remote server URL query string are now detected regardless of letter case, so parameters such as `apiKey` or `Token` are caught, not only their lowercase spellings.
+- The Test Server panel webview can no longer load local files from your workspace or the extension directory, tightening the sandbox around rendered results.
+
+### Fixed
+
+- A remote server pointed at the IPv6 loopback address (`http://[::1]`) is now treated as local and no longer flagged with a spurious insecure-transport warning.
+- The missing `-y` warning for `npx` now recognizes the launcher when it is written as `npx.cmd` or as an absolute path, not only as a bare `npx`.
+- When a configured launcher cannot be found, the connection error now explains that the command is not on the editor's PATH and suggests using an absolute path. This is a common cause on GUI-launched editors that do not inherit a shell PATH.
+- Connecting to a server is faster and no longer risks a long stall. The tester now queries the server's tools, resources, and prompts at the same time rather than one after another, so a slow listing no longer adds up across all of them.
+- A server that fails to list its tools now opens with an empty tool list and its resources and prompts intact, instead of reporting the whole connection as failed.
+- Long-running tool calls that report progress are no longer cut off at the base timeout, so a tool that keeps sending progress updates can run to completion.
+- Testing a stateful Streamable HTTP server now ends the session on the server when you close the tester, and this cleanup is time-bounded so an unresponsive server cannot stall the extension while it shuts down.
+
 ## [0.4.5] - 2026-07-15
 
 ### Security

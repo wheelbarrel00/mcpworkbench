@@ -310,6 +310,30 @@ test("a URL targeting the cloud metadata address is flagged", () => {
   assert.equal(hasIssue(meta.issues, "metadata-endpoint"), true);
 });
 
+test("credential query parameters are detected regardless of case", () => {
+  const camel = scanServers({ a: { url: "https://example.com/mcp?apiKey=abc123" } }).servers[0];
+  assert.equal(hasIssue(camel.issues, "credential-in-url"), true);
+
+  const upper = scanServers({ a: { url: "https://example.com/mcp?Token=abc123" } }).servers[0];
+  assert.equal(hasIssue(upper.issues, "credential-in-url"), true);
+});
+
+test("http to the ipv6 loopback is treated as local, not insecure", () => {
+  const loopback = scanServers({ a: { url: "http://[::1]:3000/mcp" } }).servers[0];
+  assert.equal(hasIssue(loopback.issues, "insecure-remote-transport"), false);
+});
+
+test("modern OpenAI project/service-account keys and GitHub fine-grained tokens are flagged as secrets", () => {
+  const proj = scanServers({ a: { command: "node", env: { OPENAI_API_KEY: "sk-proj-" + "A1b2".repeat(10) } } }).servers[0];
+  assert.equal(hasIssue(proj.issues, "hardcoded-secret"), true);
+
+  const svcacct = scanServers({ a: { command: "node", env: { OPENAI_API_KEY: "sk-svcacct-" + "A1b2".repeat(10) } } }).servers[0];
+  assert.equal(hasIssue(svcacct.issues, "hardcoded-secret"), true);
+
+  const pat = scanServers({ a: { command: "node", args: ["--token", "github_pat_" + "A1b2c3".repeat(8)] } }).servers[0];
+  assert.equal(hasIssue(pat.issues, "hardcoded-secret"), true);
+});
+
 test("a hardcoded secret in an env value is flagged but a ${VAR} reference is not", () => {
   const literal = scanServers({ a: { command: "node", env: { OPENAI_API_KEY: "sk-" + "a".repeat(40) } } }).servers[0];
   const issue = issueOf(literal, "hardcoded-secret");
@@ -338,6 +362,17 @@ test("an unpinned npx launcher is info-flagged; a pinned one is not", () => {
 
   const notLauncher = scanServers({ a: { command: "node", args: ["server.js"] } }).servers[0];
   assert.equal(hasIssue(notLauncher.issues, "unpinned-launcher"), false);
+});
+
+test("npx without -y is flagged as npx.cmd and as an absolute path, not just bare npx", () => {
+  const dotCmd = scanServers({ a: { command: "npx.cmd", args: ["some-pkg"] } }).servers[0];
+  assert.equal(hasIssue(dotCmd.issues, "npx-missing-y"), true);
+
+  const absolute = scanServers({ a: { command: "C:\\tools\\npx", args: ["some-pkg"] } }).servers[0];
+  assert.equal(hasIssue(absolute.issues, "npx-missing-y"), true);
+
+  const pinned = scanServers({ a: { command: "npx.cmd", args: ["-y", "some-pkg"] } }).servers[0];
+  assert.equal(hasIssue(pinned.issues, "npx-missing-y"), false);
 });
 
 test("an argument that pipes a download into a shell is flagged", () => {

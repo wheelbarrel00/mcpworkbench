@@ -39,7 +39,7 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
       "mcpWorkbench.tester",
       "MCP Server Tester",
       { viewColumn: vscode.ViewColumn.Active, preserveFocus: false },
-      { enableScripts: true, retainContextWhenHidden: true },
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] },
     );
     panel.onDidDispose(() => {
       panel = undefined;
