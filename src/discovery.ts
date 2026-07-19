@@ -18,6 +18,7 @@ interface ConfigLocation {
   resolve: (workspaceFolder?: string) => string | undefined;
   scoped: "global" | "workspace";
   includeProjects?: boolean;
+  serversOptional?: boolean;
   strict?: boolean;
 }
 
@@ -26,16 +27,24 @@ const home = os.homedir();
 const ENV_REFERENCE = /\$\{(env:)?([A-Z0-9_()]+)\}/gi;
 const EDITOR_VARIABLE_NAMES = new Set(["workspaceFolder", "userHome"]);
 
-export function claudeDesktopConfigPath(): string | undefined {
+function appDataRoot(): string | undefined {
   if (process.platform === "win32") {
-    return process.env.APPDATA
-      ? path.join(process.env.APPDATA, "Claude", "claude_desktop_config.json")
-      : undefined;
+    return process.env.APPDATA;
   }
   if (process.platform === "darwin") {
-    return path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+    return path.join(home, "Library", "Application Support");
   }
-  return path.join(home, ".config", "Claude", "claude_desktop_config.json");
+  return process.env.XDG_CONFIG_HOME || path.join(home, ".config");
+}
+
+export function claudeDesktopConfigPath(): string | undefined {
+  const root = appDataRoot();
+  return root ? path.join(root, "Claude", "claude_desktop_config.json") : undefined;
+}
+
+export function vscodeUserConfigPath(): string | undefined {
+  const root = appDataRoot();
+  return root ? path.join(root, "Code", "User", "mcp.json") : undefined;
 }
 
 const LOCATIONS: ConfigLocation[] = [
@@ -46,10 +55,12 @@ const LOCATIONS: ConfigLocation[] = [
 
   { source: "vscode-workspace", rootKey: "servers", scoped: "workspace",
     resolve: (ws) => (ws ? path.join(ws, ".vscode", "mcp.json") : undefined) },
+  { source: "vscode-user", rootKey: "servers", scoped: "global",
+    resolve: () => vscodeUserConfigPath() },
 
   { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace", strict: true,
     resolve: (ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
-  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true, strict: true,
+  { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true, serversOptional: true, strict: true,
     resolve: () => path.join(home, ".claude.json") },
 
   { source: "claude-desktop", rootKey: "mcpServers", scoped: "global",
@@ -79,6 +90,20 @@ function describeParseError(text: string, error: ParseError): string {
   const line = before.split("\n").length;
   const column = error.offset - before.lastIndexOf("\n");
   return `${printParseErrorCode(error.error)} at line ${line}, column ${column}`;
+}
+
+function readConfigText(p: string): string {
+  const buf = fs.readFileSync(p);
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    return new TextDecoder("utf-16le").decode(buf.subarray(2));
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    return new TextDecoder("utf-16be").decode(buf.subarray(2));
+  }
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return buf.toString("utf8", 3);
+  }
+  return buf.toString("utf8");
 }
 
 function normalizeTransport(entry: any): {
@@ -328,8 +353,10 @@ function stringArgs(value: unknown, issues: ConfigIssue[]): string[] {
   value.forEach((item, i) => {
     if (typeof item === "string") {
       out.push(item);
+    } else if (typeof item === "number" || typeof item === "boolean") {
+      out.push(String(item));
     } else {
-      issues.push({ level: "warning", code: "non-string-arg", message: `args[${i}] is not a string and was ignored.`, path: ["args", i] });
+      issues.push({ level: "warning", code: "non-string-arg", message: `args[${i}] is not a string, number, or boolean and was ignored.`, path: ["args", i] });
     }
   });
   return out;
@@ -353,7 +380,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizePath(p: string): string {
-  return p.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  const normalized = p.replace(/[\\/]+$/, "").replace(/\\/g, "/");
+  return process.platform === "linux" ? normalized : normalized.toLowerCase();
 }
 
 const SECURITY_CODES = new Set([
@@ -388,6 +416,10 @@ function applySecurityPolicy(issues: ConfigIssue[], ctx: ScanContext): ConfigIss
   return out;
 }
 
+function noServersConfigured(): ConfigIssue {
+  return { level: "info", code: "no-servers", message: "No MCP servers are configured in this file." };
+}
+
 function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext): ScannedFile {
   const result: ScannedFile = {
     path: p ?? "(unresolved)",
@@ -401,7 +433,7 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
 
   let parsed: any;
   try {
-    parsed = parseConfig(fs.readFileSync(p, "utf8"), loc.strict ?? false);
+    parsed = parseConfig(readConfigText(p), loc.strict ?? false);
   } catch (e) {
     result.fileIssues.push({
       level: "error",
@@ -428,7 +460,12 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
       return result;
     }
     const otherKey = loc.rootKey === "servers" ? "mcpServers" : "servers";
-    const hint = isPlainObject(parsed?.[otherKey])
+    const wrongKeyPresent = isPlainObject(parsed?.[otherKey]);
+    if (loc.serversOptional && parsed?.[loc.rootKey] === undefined && !wrongKeyPresent) {
+      result.fileIssues.push(noServersConfigured());
+      return result;
+    }
+    const hint = wrongKeyPresent
       ? ` Found "${otherKey}" instead — this editor expects "${loc.rootKey}".`
       : "";
     result.fileIssues.push({
@@ -462,12 +499,16 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
   }
 
   if (total === 0 && mainPresent) {
-    result.fileIssues.push({
-      level: "warning",
-      code: "empty-root-key",
-      message: `"${loc.rootKey}" is present but defines no servers.`,
-      path: [loc.rootKey],
-    });
+    result.fileIssues.push(
+      loc.serversOptional
+        ? noServersConfigured()
+        : {
+            level: "warning",
+            code: "empty-root-key",
+            message: `"${loc.rootKey}" is present but defines no servers.`,
+            path: [loc.rootKey],
+          },
+    );
   }
   return result;
 }

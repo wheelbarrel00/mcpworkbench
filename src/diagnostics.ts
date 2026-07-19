@@ -3,7 +3,11 @@ import { ConfigIssue, ScannedFile } from "./types";
 import { locateIssue, parseDocumentTree } from "./issueLocator";
 
 const SOURCE = "MCP Workbench";
-const SKIP_CODES = new Set(["projects-filtered"]);
+const SKIP_CODES = new Set(["projects-filtered", "no-servers"]);
+
+export function reportableIssues(issues: ConfigIssue[]): ConfigIssue[] {
+  return issues.filter((issue) => !SKIP_CODES.has(issue.code));
+}
 
 const SEVERITY: Record<ConfigIssue["level"], vscode.DiagnosticSeverity> = {
   error: vscode.DiagnosticSeverity.Error,
@@ -49,7 +53,8 @@ export class McpDiagnostics {
       ...file.fileIssues,
       ...file.servers.flatMap((server) => server.issues),
     ]);
-    if (!issues.some((issue) => !SKIP_CODES.has(issue.code))) {
+    const reportable = reportableIssues(issues);
+    if (reportable.length === 0) {
       return [];
     }
 
@@ -62,10 +67,7 @@ export class McpDiagnostics {
     const tree = parseDocumentTree(doc.getText());
 
     const diagnostics: vscode.Diagnostic[] = [];
-    for (const issue of issues) {
-      if (SKIP_CODES.has(issue.code)) {
-        continue;
-      }
+    for (const issue of reportable) {
       const span = locateIssue(tree, issue);
       const range = span
         ? new vscode.Range(doc.positionAt(span.offset), doc.positionAt(span.offset + span.length))

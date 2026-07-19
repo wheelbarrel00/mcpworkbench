@@ -10,6 +10,7 @@ const SOURCE_LABELS: Record<McpSource, string> = {
   "cursor-global": "Cursor (global)",
   "cursor-workspace": "Cursor (workspace)",
   "vscode-workspace": "VS Code (workspace)",
+  "vscode-user": "VS Code (user)",
   "claude-code-workspace": "Claude Code (workspace)",
   "claude-code-user": "Claude Code (user)",
   "claude-desktop": "Claude Desktop",

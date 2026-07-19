@@ -62,6 +62,7 @@ Open a server to call its tools through a form generated from each tool's input 
 | Cursor (global) | `~/.cursor/mcp.json` | `mcpServers` |
 | Cursor (workspace) | `<workspace>/.cursor/mcp.json` | `mcpServers` |
 | VS Code (workspace) | `<workspace>/.vscode/mcp.json` | `servers` |
+| VS Code (user) | `%APPDATA%\Code\User\mcp.json` (Windows) · `~/Library/Application Support/Code/User/mcp.json` (macOS) · `~/.config/Code/User/mcp.json` (Linux) | `servers` |
 | Claude Code (workspace) | `<workspace>/.mcp.json` | `mcpServers` |
 | Claude Code (user) | `~/.claude.json` | `mcpServers` |
 | Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` (Windows) · `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `~/.config/Claude/claude_desktop_config.json` (Linux) | `mcpServers` |
@@ -126,10 +127,6 @@ Press **F5** to launch an Extension Development Host with MCP Workbench loaded, 
   ![The Test Connection button](media/screenshots/test-connection-button.png)
 
 - **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, tools, resources, and prompts — or the exact connection error. The panel stays connected while open: call a tool through a form generated from its schema (or switch to raw JSON), **Read** a resource (filling in any template variables), or **Get prompt** with its arguments to run against the live server, then close the panel to disconnect.
-
-## Roadmap
-
-- Opt-in support for VS Code user-profile `mcp.json` paths.
 
 ## License
 

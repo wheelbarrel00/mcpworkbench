@@ -4,6 +4,19 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-07-19
+
+### Added
+
+- VS Code user-profile MCP servers are now discovered and listed as a "VS Code (user)" source. The file is read from `%APPDATA%\Code\User\mcp.json` on Windows, `~/Library/Application Support/Code/User/mcp.json` on macOS, and `~/.config/Code/User/mcp.json` on Linux, where `XDG_CONFIG_HOME` is honored when set.
+
+### Fixed
+
+- Config files saved as UTF-16, which is the default of PowerShell's `Out-File`, are now decoded and parsed correctly instead of failing with a misleading invalid-JSON error.
+- An empty `~/.claude.json`, which is normal for a fresh Claude Code install, is no longer reported as an error. A file that uses the wrong root key or a malformed `mcpServers` is still flagged, so genuine mistakes are not hidden.
+- Numeric and boolean values in a server's `args` are now passed through as strings instead of being dropped, so an argument list such as `["--port", 8080, "--verbose"]` keeps its order and its values.
+- Project paths recorded in `~/.claude.json` are now matched case-sensitively on Linux, so two projects that differ only by letter case are no longer treated as the same folder.
+
 ## [0.4.6] - 2026-07-17
 
 ### Security

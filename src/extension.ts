@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
-import { claudeDesktopConfigPath } from "./discovery";
+import { claudeDesktopConfigPath, vscodeUserConfigPath } from "./discovery";
 import { ServersProvider, serverId, isWorkspaceScoped } from "./serversTree";
 import { showTester, disposeTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
@@ -20,13 +20,13 @@ const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
 };
 
 const HOME = os.homedir();
-const claudeDesktopConfig = claudeDesktopConfigPath();
+const toWatchTarget = (file: string | undefined) =>
+  file ? [{ dir: path.dirname(file), file: path.basename(file) }] : [];
 const GLOBAL_WATCH_TARGETS: Array<{ dir: string; file: string }> = [
   { dir: HOME, file: ".claude.json" },
   { dir: path.join(HOME, ".cursor"), file: "mcp.json" },
-  ...(claudeDesktopConfig
-    ? [{ dir: path.dirname(claudeDesktopConfig), file: path.basename(claudeDesktopConfig) }]
-    : []),
+  ...toWatchTarget(claudeDesktopConfigPath()),
+  ...toWatchTarget(vscodeUserConfigPath()),
 ];
 
 export function activate(context: vscode.ExtensionContext) {

@@ -7,6 +7,7 @@ export type McpSource =
   | "cursor-global"
   | "cursor-workspace"
   | "vscode-workspace"
+  | "vscode-user"
   | "claude-code-workspace"
   | "claude-code-user"
   | "claude-desktop";

@@ -37,7 +37,7 @@ await build({
   logLevel: "silent",
 });
 
-const { discoverAll, claudeDesktopConfigPath } = require(bundlePath);
+const { discoverAll, claudeDesktopConfigPath, vscodeUserConfigPath } = require(bundlePath);
 
 function withPlatform(platform, fn) {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
@@ -46,6 +46,18 @@ function withPlatform(platform, fn) {
     fn();
   } finally {
     Object.defineProperty(process, "platform", original);
+  }
+}
+
+function withEnv(key, value, fn) {
+  const saved = process.env[key];
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+  try {
+    fn();
+  } finally {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
   }
 }
 
@@ -58,12 +70,31 @@ function scanCursorWorkspace(contents) {
   return scanned.find((f) => f.source === "cursor-workspace" && f.path === file);
 }
 
+function scanCursorWorkspaceBytes(buffer) {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".cursor", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, buffer);
+  const scanned = discoverAll([ws]);
+  return scanned.find((f) => f.source === "cursor-workspace" && f.path === file);
+}
+
 function scanClaudeCodeWorkspace(contents) {
   const ws = mkTemp("mcpwb-ws-");
   const file = path.join(ws, ".mcp.json");
   fs.writeFileSync(file, contents);
   const scanned = discoverAll([ws]);
   return scanned.find((f) => f.source === "claude-code-workspace" && f.path === file);
+}
+
+function scanClaudeCodeUser(contents) {
+  const claudeJson = path.join(process.env.USERPROFILE, ".claude.json");
+  fs.writeFileSync(claudeJson, contents);
+  try {
+    return discoverAll([]).find((f) => f.source === "claude-code-user");
+  } finally {
+    fs.rmSync(claudeJson, { force: true });
+  }
 }
 
 function hasIssue(issues, code) {
@@ -134,6 +165,28 @@ test("trailing commas without comments still parse", () => {
   assert.deepEqual(file.servers[0].transport.args, ["x"]);
 });
 
+test("a UTF-16LE config with a BOM is decoded, not rejected as invalid JSON", () => {
+  const json = JSON.stringify({ mcpServers: { fs: { command: "node" } } });
+  const buffer = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(json, "utf16le")]);
+  const file = scanCursorWorkspaceBytes(buffer);
+  assert.ok(file);
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), false);
+  assert.equal(file.servers.length, 1);
+  assert.equal(file.servers[0].name, "fs");
+});
+
+test("a UTF-16BE config with a BOM is decoded, not rejected as invalid JSON", () => {
+  const json = JSON.stringify({ mcpServers: { fs: { command: "node" } } });
+  const body = Buffer.from(json, "utf16le");
+  body.swap16();
+  const buffer = Buffer.concat([Buffer.from([0xfe, 0xff]), body]);
+  const file = scanCursorWorkspaceBytes(buffer);
+  assert.ok(file);
+  assert.equal(hasIssue(file.fileIssues, "bad-json"), false);
+  assert.equal(file.servers.length, 1);
+  assert.equal(file.servers[0].name, "fs");
+});
+
 test("a leading UTF-8 BOM does not make the whole file vanish", () => {
   const bom = String.fromCharCode(0xfeff);
   const file = scanCursorWorkspace(
@@ -179,15 +232,24 @@ test("an array mcpServers does not produce servers named 0,1", () => {
   assert.equal(hasIssue(file.fileIssues, "missing-root-key"), true);
 });
 
-test("non-string args and env values are dropped and flagged", () => {
+test("scalar args are coerced to strings while non-scalar args and non-string env values are dropped", () => {
   const file = scanCursorWorkspace(
-    JSON.stringify({ mcpServers: { x: { command: "node", args: ["ok", 42, null], env: { A: "s", B: 5 } } } })
+    JSON.stringify({ mcpServers: { x: { command: "node", args: ["ok", 42, true, null], env: { A: "s", B: 5 } } } })
   );
   const server = file.servers[0];
-  assert.deepEqual(server.transport.args, ["ok"]);
+  assert.deepEqual(server.transport.args, ["ok", "42", "true"]);
   assert.deepEqual(server.transport.env, { A: "s" });
   assert.equal(server.issues.some((i) => i.code === "non-string-arg"), true);
   assert.equal(server.issues.some((i) => i.code === "non-string-value"), true);
+});
+
+test("a numeric arg is coerced in place so argv order is preserved", () => {
+  const file = scanCursorWorkspace(
+    JSON.stringify({ mcpServers: { x: { command: "server", args: ["--port", 8080, "--verbose"] } } })
+  );
+  const server = file.servers[0];
+  assert.deepEqual(server.transport.args, ["--port", "8080", "--verbose"]);
+  assert.equal(server.issues.some((i) => i.code === "non-string-arg"), false);
 });
 
 test("a repeated unset env var reference is only flagged once", () => {
@@ -254,6 +316,71 @@ test("claude-code-user projects filter to the open workspace unless showAll is s
 
     const all = discoverAll([wsMatch], { showAllClaudeProjects: true }).find((f) => f.source === "claude-code-user");
     assert.deepEqual(all.servers.map((s) => s.name).sort(), ["inside", "outside"]);
+  } finally {
+    fs.rmSync(claudeJson, { force: true });
+  }
+});
+
+test("a ~/.claude.json with no servers reports an info note, not a missing-root-key error", () => {
+  const file = scanClaudeCodeUser(JSON.stringify({ numStartups: 3, tipsHistory: {} }));
+  assert.ok(file);
+  assert.equal(file.exists, true);
+  assert.equal(file.servers.length, 0);
+  assert.equal(hasIssue(file.fileIssues, "missing-root-key"), false);
+  const note = file.fileIssues.find((i) => i.code === "no-servers");
+  assert.ok(note, "a no-servers note should be present");
+  assert.equal(note.level, "info");
+});
+
+test("a ~/.claude.json with an empty mcpServers object is info, not an empty-root-key warning", () => {
+  const file = scanClaudeCodeUser(JSON.stringify({ mcpServers: {} }));
+  assert.ok(file);
+  assert.equal(file.servers.length, 0);
+  assert.equal(hasIssue(file.fileIssues, "empty-root-key"), false);
+  const note = file.fileIssues.find((i) => i.code === "no-servers");
+  assert.ok(note, "a no-servers note should be present");
+  assert.equal(note.level, "info");
+});
+
+test("a dedicated config with no root key is still a missing-root-key error", () => {
+  const file = scanCursorWorkspace(JSON.stringify({ somethingElse: true }));
+  assert.ok(file);
+  assert.equal(hasIssue(file.fileIssues, "missing-root-key"), true);
+  assert.equal(hasIssue(file.fileIssues, "no-servers"), false);
+});
+
+test("a ~/.claude.json with the wrong root key still errors with the corrective hint", () => {
+  const file = scanClaudeCodeUser(JSON.stringify({ servers: { foo: { command: "node" } } }));
+  assert.ok(file);
+  assert.equal(hasIssue(file.fileIssues, "no-servers"), false);
+  const err = file.fileIssues.find((i) => i.code === "missing-root-key");
+  assert.ok(err, "a wrong key must not be silently downgraded to a no-servers note");
+  assert.equal(err.level, "error");
+  assert.match(err.message, /Found "servers" instead/);
+});
+
+test("a ~/.claude.json with a malformed mcpServers still errors, not a no-servers note", () => {
+  const file = scanClaudeCodeUser(JSON.stringify({ mcpServers: [{ command: "node" }] }));
+  assert.ok(file);
+  assert.equal(hasIssue(file.fileIssues, "no-servers"), false);
+  assert.equal(hasIssue(file.fileIssues, "missing-root-key"), true);
+});
+
+test("project paths are matched case-sensitively on Linux but case-insensitively elsewhere", () => {
+  const claudeJson = path.join(process.env.USERPROFILE, ".claude.json");
+  fs.writeFileSync(
+    claudeJson,
+    JSON.stringify({ projects: { "/home/u/API": { mcpServers: { inside: { command: "node" } } } } }),
+  );
+  try {
+    withPlatform("linux", () => {
+      const file = discoverAll(["/home/u/api"]).find((f) => f.source === "claude-code-user");
+      assert.equal(file.servers.length, 0, "a case-different path must not match on a case-sensitive filesystem");
+    });
+    withPlatform("darwin", () => {
+      const file = discoverAll(["/home/u/api"]).find((f) => f.source === "claude-code-user");
+      assert.deepEqual(file.servers.map((s) => s.name), ["inside"], "a case-insensitive filesystem folds case");
+    });
   } finally {
     fs.rmSync(claudeJson, { force: true });
   }
@@ -475,10 +602,12 @@ test("the Claude Desktop config path resolves to the per-OS application-support 
   });
 
   withPlatform("linux", () => {
-    assert.equal(
-      claudeDesktopConfigPath(),
-      path.join(home, ".config", "Claude", "claude_desktop_config.json"),
-    );
+    withEnv("XDG_CONFIG_HOME", undefined, () => {
+      assert.equal(
+        claudeDesktopConfigPath(),
+        path.join(home, ".config", "Claude", "claude_desktop_config.json"),
+      );
+    });
   });
 });
 
@@ -490,6 +619,89 @@ test("the Claude Desktop config path is undefined on Windows when APPDATA is uns
       assert.equal(claudeDesktopConfigPath(), undefined);
     } finally {
       if (savedAppData !== undefined) process.env.APPDATA = savedAppData;
+    }
+  });
+});
+
+test("the VS Code user config path resolves to the per-OS User location", () => {
+  const home = process.env.USERPROFILE;
+
+  withPlatform("win32", () => {
+    const savedAppData = process.env.APPDATA;
+    process.env.APPDATA = path.join(home, "AppData", "Roaming");
+    try {
+      assert.equal(
+        vscodeUserConfigPath(),
+        path.join(process.env.APPDATA, "Code", "User", "mcp.json"),
+      );
+    } finally {
+      if (savedAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = savedAppData;
+    }
+  });
+
+  withPlatform("darwin", () => {
+    assert.equal(
+      vscodeUserConfigPath(),
+      path.join(home, "Library", "Application Support", "Code", "User", "mcp.json"),
+    );
+  });
+
+  withPlatform("linux", () => {
+    withEnv("XDG_CONFIG_HOME", undefined, () => {
+      assert.equal(
+        vscodeUserConfigPath(),
+        path.join(home, ".config", "Code", "User", "mcp.json"),
+      );
+    });
+  });
+});
+
+test("on Linux, XDG_CONFIG_HOME overrides the default config root", () => {
+  const home = process.env.USERPROFILE;
+  withPlatform("linux", () => {
+    withEnv("XDG_CONFIG_HOME", "/home/u/.xdg", () => {
+      assert.equal(vscodeUserConfigPath(), path.join("/home/u/.xdg", "Code", "User", "mcp.json"));
+      assert.equal(claudeDesktopConfigPath(), path.join("/home/u/.xdg", "Claude", "claude_desktop_config.json"));
+    });
+    withEnv("XDG_CONFIG_HOME", undefined, () => {
+      assert.equal(vscodeUserConfigPath(), path.join(home, ".config", "Code", "User", "mcp.json"));
+    });
+  });
+});
+
+test("the VS Code user config path is undefined on Windows when APPDATA is unset", () => {
+  withPlatform("win32", () => {
+    const savedAppData = process.env.APPDATA;
+    delete process.env.APPDATA;
+    try {
+      assert.equal(vscodeUserConfigPath(), undefined);
+    } finally {
+      if (savedAppData !== undefined) process.env.APPDATA = savedAppData;
+    }
+  });
+});
+
+test("a VS Code user mcp.json is discovered at the per-OS User location", () => {
+  withPlatform("win32", () => {
+    const savedAppData = process.env.APPDATA;
+    const appData = mkTemp("mcpwb-appdata-");
+    process.env.APPDATA = appData;
+    const file = path.join(appData, "Code", "User", "mcp.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ servers: { demo: { command: "node", args: ["x.js"] } } }));
+    try {
+      const scanned = discoverAll([]);
+      const found = scanned.find((f) => f.source === "vscode-user");
+      assert.ok(found, "a vscode-user source should be scanned");
+      assert.equal(found.exists, true);
+      assert.equal(found.path, file);
+      assert.equal(found.servers.length, 1);
+      assert.equal(found.servers[0].name, "demo");
+      assert.equal(found.servers[0].rootKey, "servers");
+    } finally {
+      if (savedAppData === undefined) delete process.env.APPDATA;
+      else process.env.APPDATA = savedAppData;
     }
   });
 });

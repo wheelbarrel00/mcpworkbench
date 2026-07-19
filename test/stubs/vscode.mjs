@@ -33,6 +33,8 @@ export const workspace = {
 
 export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 
+export const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
+
 export class TreeItem {
   constructor(label, collapsibleState) {
     this.label = label;

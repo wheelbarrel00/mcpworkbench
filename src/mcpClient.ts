@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.4.6";
+const CLIENT_VERSION = "0.4.7";
 const STDERR_CAP = 8192;
 const CALL_TOOL_MAX_TIMEOUT = 300000;
 const TERMINATE_TIMEOUT = 5000;
