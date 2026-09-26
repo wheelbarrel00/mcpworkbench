@@ -243,3 +243,25 @@ test("a forward-slash project path under home is shown with ~ and no username", 
   assert.match(item.tooltip.value, /Project: `~\/Documents\/demo`/);
   assert.ok(!item.tooltip.value.includes(path.basename(home)), "home dir name should not leak");
 });
+
+test("findServer resolves a tree node id to the latest scan and ignores unknown ids", () => {
+  const ws = cursorWorkspace({ alpha: { command: "node", args: ["a.js"] } });
+  const p = providerFor([ws]);
+  const node = p.getChildren(cursorSources(p)[0]).find((k) => k.kind === "server");
+  assert.equal(p.findServer(node.id), node.server);
+  assert.equal(p.findServer("server|cursor-global|/nowhere|x"), undefined);
+
+  fs.writeFileSync(path.join(ws, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { alpha: { command: "node", args: ["b.js"] } } }));
+  p.refresh();
+  assert.deepEqual(p.findServer(node.id).transport.args, ["b.js"]);
+});
+
+test("serverForCommand only accepts a tree node id that is in the latest scan", () => {
+  const ws = cursorWorkspace({ alpha: { command: "node" } });
+  const p = providerFor([ws]);
+  const node = p.getChildren(cursorSources(p)[0]).find((k) => k.kind === "server");
+  assert.equal(p.serverForCommand(node), node.server);
+  assert.equal(p.serverForCommand({ id: "server|cursor-global|/nowhere|x" }), undefined);
+  assert.equal(p.serverForCommand({ ...node.server }), undefined, "a raw server object without a tree id is ignored");
+  assert.equal(p.serverForCommand(undefined), undefined);
+});

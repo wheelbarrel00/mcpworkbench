@@ -3,6 +3,8 @@ export type McpTransport =
   | { kind: "http"; url: string; headers: Record<string, string> }
   | { kind: "sse"; url: string; headers: Record<string, string> };
 
+export type StdioTransport = Extract<McpTransport, { kind: "stdio" }>;
+
 export type McpSource =
   | "cursor-global"
   | "cursor-workspace"

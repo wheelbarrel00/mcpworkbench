@@ -53,6 +53,21 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     this._onDidChange.fire();
   }
 
+  serverForCommand(arg: unknown): DiscoveredServer | undefined {
+    const id = arg && typeof arg === "object" ? (arg as { id?: unknown }).id : undefined;
+    return typeof id === "string" ? this.findServer(id) : undefined;
+  }
+
+  findServer(id: string): DiscoveredServer | undefined {
+    for (const file of this.files) {
+      const server = file.servers.find((candidate) => serverId(candidate) === id);
+      if (server) {
+        return server;
+      }
+    }
+    return undefined;
+  }
+
   refresh(): void {
     const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
     const config = vscode.workspace.getConfiguration("mcpWorkbench");

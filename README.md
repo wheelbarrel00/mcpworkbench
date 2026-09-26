@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/logo.png" alt="MCP Workbench" width="320" />
+  <img src="media/logo.png" alt="MCP Workbench" width="256" />
 </p>
 
 # MCP Workbench
@@ -21,7 +21,8 @@ MCP server definitions end up scattered across half a dozen files with different
 - **Unified discovery** — one tree of every MCP server found across Cursor, VS Code, Claude Code, and Claude Desktop, grouped by source.
 - **Transport normalization** — `stdio`, `http`, and `sse` servers shown with a consistent shape regardless of which editor's field conventions the file used.
 - **Configuration validation** — surfaces the silent failures: wrong root key, unparseable JSON, `npx` without `-y`, and `${ENV}` references that aren't set in your environment.
-- **Security & correctness checks** — flags hardcoded API keys, credentials in URLs, plaintext `http://` remotes, unpinned `npx`/`bunx` launchers, `curl | sh` bootstrap chains, and cloud-metadata endpoints, all from the config you already have.
+- **Security & correctness checks** — flags hardcoded API keys, credentials in URLs, plaintext `http://` remotes, unpinned `npx`/`bunx` launchers, `curl | sh` bootstrap chains, encoded PowerShell, code-loading or registry-redirecting environment variables like `NODE_OPTIONS=--require`, and cloud-metadata endpoints, all from the config you already have.
+- **Safe with untrusted repos** — servers defined by a workspace never launch without showing you the program, each argument, the environment, the headers, and which of your environment variables they read. Approvals are pinned to that exact configuration, and in Restricted Mode nothing that runs from the workspace launches at all while validation keeps working.
 - **Problems-panel diagnostics** — every issue is published as a native VS Code diagnostic anchored to the exact key in the config file, so it shows up as a squiggle and in the Problems panel with click-to-jump.
 - **Connection testing** — launch any server over the MCP SDK, run the `initialize` handshake, and list its capabilities, tools, resources, and prompts (with input schemas) — or see the exact reason it failed to connect.
 - **Per-server health** — a fast **Test Connection** records each server's handshake latency and tool count, shown inline in the tree, with a status-bar rollup of how many servers and issues were found across every source.
@@ -79,6 +80,7 @@ Every issue below is also published to the Problems panel, anchored to the exact
 | --- | --- | --- |
 | `missing-root-key` | error | The right file with the wrong top-level key, so the editor loads no servers without warning. |
 | `bad-json` | error | A config file that can't be parsed. |
+| `read-failed` | error | A config path that exists but can't be read (permissions, or a folder where a file should be). |
 | `unknown-transport` | error | An entry with neither a `command` (stdio) nor a `url` (http/sse). |
 | `empty-command` | error | An stdio server whose `command` is blank. |
 | `empty-root-key` | warning | The root key is present but defines no servers. |
@@ -90,15 +92,16 @@ Every issue below is also published to the Problems panel, anchored to the exact
 
 | Issue | Level | What it catches |
 | --- | --- | --- |
-| `hardcoded-secret` | warning | A literal API key or private key in an arg, env value, or header (OpenAI, Anthropic, GitHub, Slack, AWS, PEM). Use a `${VAR}` reference instead. |
+| `hardcoded-secret` | warning | A literal API key, token, or private key in the command, an arg, the URL, an env value, or a header (OpenAI, Anthropic, GitHub, GitLab, Slack, Stripe, Google, Hugging Face, npm, AWS, JWTs, PEM), or a literal credential under a field like `Authorization` or `*_API_KEY`. Use a `${VAR}` reference instead. |
 | `credential-in-url` | warning | Credentials in the URL's userinfo or a `token`/`secret`/`key`-style query parameter, where they leak into logs. |
 | `insecure-remote-transport` | warning | A plaintext `http://` URL to a non-local host, so traffic and credentials travel unencrypted. |
 | `risky-shell-pipe` | warning | An argument that pipes a downloaded script straight into a shell (`curl … \| sh`), running remote code at launch. |
 | `encoded-powershell` | warning | PowerShell invoked with an encoded command (`-enc`), which hides what actually runs. |
+| `env-code-injection` | warning | An environment variable that loads extra code before the server starts (`NODE_OPTIONS` with `--require`/`--import`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `BASH_ENV`, `DOTNET_STARTUP_HOOKS`, and similar) or points the package installer at another registry (`npm_config_registry`, `PIP_INDEX_URL`, `UV_INDEX_URL`). |
 | `metadata-endpoint` | warning | A URL pointing at the cloud metadata address (`169.254.169.254`), a common SSRF target. |
 | `unpinned-launcher` | info | `npx`/`bunx`/`pnpm dlx`/`yarn dlx`/`npm exec` running a package with no version pin, so a future release could change behavior. |
 
-Turn the whole security lens off with `mcpWorkbench.security.enabled: false`, or retune individual rules with `mcpWorkbench.security.ruleSeverity` — e.g. `{ "unpinned-launcher": "off", "hardcoded-secret": "error" }` (values: `off`, `info`, `warning`, `error`).
+Turn the whole security lens off with `mcpWorkbench.security.enabled: false`, or retune individual rules with `mcpWorkbench.security.ruleSeverity` — e.g. `{ "unpinned-launcher": "off", "hardcoded-secret": "error" }` (values: `off`, `info`, `warning`, `error`). Both settings are read from your user settings only, so a repository's workspace settings can't switch the checks off.
 
 ## Install
 
@@ -127,6 +130,7 @@ Press **F5** to launch an Extension Development Host with MCP Workbench loaded, 
   ![The Test Connection button](media/screenshots/test-connection-button.png)
 
 - **Test Server** — click the ▶ button on a server (or right-click → Test Server) to connect over the MCP SDK and open a panel with the server's `initialize` info, capabilities, tools, resources, and prompts — or the exact connection error. The panel stays connected while open: call a tool through a form generated from its schema (or switch to raw JSON), **Read** a resource (filling in any template variables), or **Get prompt** with its arguments to run against the live server, then close the panel to disconnect.
+- **Launching workspace servers** — servers from `.mcp.json`, `.vscode/mcp.json`, or `.cursor/mcp.json` come from the repo, so the first test asks first and shows the command, environment, headers, and the environment variables that will be filled in. **Always allow this configuration** remembers that exact entry; if the repo later changes it, you're asked again. Run **MCP Workbench: Reset Launch Trust** to forget every approval in this workspace. In Restricted Mode, nothing that runs from the workspace launches until you trust it, including your own servers set up to run in that folder. On Windows, a bare command like `npx` is resolved from your PATH before the project folder, so a same-named file committed to the repo can't stand in for it; if the program is only found through the workspace folder, the prompt says so.
 
 ## License
 

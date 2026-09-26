@@ -2,18 +2,19 @@ import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
 import { claudeDesktopConfigPath, vscodeUserConfigPath } from "./discovery";
-import { ServersProvider, serverId, isWorkspaceScoped } from "./serversTree";
+import { ServersProvider, serverId } from "./serversTree";
 import { showTester, disposeTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
 import { probe } from "./mcpClient";
 import { HealthStore, recordFromProbe, rollup, statusBarSeverity, statusBarText, statusBarTooltip } from "./health";
-import { DiscoveredServer, ScannedFile } from "./types";
+import { LaunchTrustStore } from "./launchTrust";
+import { confirmLaunch, forgetLegacyLaunchTrust, resetLaunchTrust } from "./launchGate";
+import { ScannedFile } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
 
 const PROBE_TIMEOUT_MS = 10000;
 const REFRESH_DEBOUNCE_MS = 300;
-const TRUST_LAUNCH_KEY = "trustWorkspaceLaunch";
 const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
   error: "statusBarItem.errorBackground",
   warning: "statusBarItem.warningBackground",
@@ -35,7 +36,9 @@ export function activate(context: vscode.ExtensionContext) {
   const provider = new ServersProvider();
   const diagnostics = new McpDiagnostics();
   const health = new HealthStore(context.workspaceState);
+  const launchTrust = new LaunchTrustStore(context.workspaceState);
   provider.setHealthProvider((id) => health.get(id));
+  void forgetLegacyLaunchTrust(context.workspaceState);
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "mcpWorkbench.servers.focus";
@@ -61,8 +64,11 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.window.registerTreeDataProvider("mcpWorkbench.servers", provider),
     vscode.commands.registerCommand("mcpWorkbench.refresh", () => provider.refresh()),
+    vscode.commands.registerCommand("mcpWorkbench.resetLaunchTrust", async () => {
+      vscode.window.showInformationMessage(await resetLaunchTrust(launchTrust));
+    }),
     vscode.commands.registerCommand("mcpWorkbench.openConfig", async (arg: unknown) => {
-      const server = resolveServer(arg);
+      const server = provider.serverForCommand(arg);
       if (!server?.configPath) {
         return;
       }
@@ -73,8 +79,8 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand("mcpWorkbench.testServer", async (arg: unknown) => {
-      const server = resolveServer(arg);
-      if (!server || !(await confirmLaunch(context, server))) {
+      const server = provider.serverForCommand(arg);
+      if (!server || !(await confirmLaunch(launchTrust, server))) {
         return;
       }
       showTester(server).catch((e) =>
@@ -82,8 +88,8 @@ export function activate(context: vscode.ExtensionContext) {
       );
     }),
     vscode.commands.registerCommand("mcpWorkbench.testConnection", async (arg: unknown) => {
-      const server = resolveServer(arg);
-      if (!server || !(await confirmLaunch(context, server))) {
+      const server = provider.serverForCommand(arg);
+      if (!server || !(await confirmLaunch(launchTrust, server))) {
         return;
       }
       const id = serverId(server);
@@ -155,6 +161,7 @@ export function activate(context: vscode.ExtensionContext) {
         provider.refresh();
       }
     }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => provider.refresh()),
   );
 
   syncWatcher();
@@ -169,28 +176,6 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function launchTarget(server: DiscoveredServer): string {
-  const t = server.transport;
-  return t.kind === "stdio" ? [t.command, ...t.args].join(" ").trim() : t.url;
-}
-
-async function confirmLaunch(context: vscode.ExtensionContext, server: DiscoveredServer): Promise<boolean> {
-  if (!isWorkspaceScoped(server.source) || context.workspaceState.get<boolean>(TRUST_LAUNCH_KEY)) {
-    return true;
-  }
-  const choice = await vscode.window.showWarningMessage(
-    `MCP Workbench: launch ${server.name} from this workspace?`,
-    { modal: true, detail: `This runs a command defined in the workspace config.\n\n${launchTarget(server)}` },
-    "Launch",
-    "Always allow in this workspace",
-  );
-  if (choice === "Always allow in this workspace") {
-    await context.workspaceState.update(TRUST_LAUNCH_KEY, true);
-    return true;
-  }
-  return choice === "Launch";
-}
-
 async function showProbeError(name: string, error?: string, detail?: string): Promise<void> {
   const message = `MCP Workbench: ${name} did not respond — ${error ?? "unknown error"}`;
   if (!detail) {
@@ -201,15 +186,4 @@ async function showProbeError(name: string, error?: string, detail?: string): Pr
   if (choice === "Show details") {
     void vscode.window.showErrorMessage(`${name} — details`, { modal: true, detail });
   }
-}
-
-function resolveServer(arg: unknown): DiscoveredServer | undefined {
-  if (!arg || typeof arg !== "object") {
-    return undefined;
-  }
-  const node = arg as { server?: DiscoveredServer; transport?: unknown };
-  if (node.server) {
-    return node.server;
-  }
-  return node.transport ? (arg as DiscoveredServer) : undefined;
 }

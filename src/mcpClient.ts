@@ -1,15 +1,16 @@
-import * as fs from "fs";
-import * as os from "os";
 import { spawnSync } from "child_process";
 import { StringDecoder } from "string_decoder";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { spawnableCommand } from "./executable";
+import { mapValues, planStdioLaunch } from "./launchPlan";
+import { substituteVariables } from "./substitution";
 import { DiscoveredServer } from "./types";
 
 const CLIENT_NAME = "mcp-workbench";
-const CLIENT_VERSION = "0.4.7";
+const CLIENT_VERSION = "0.4.8";
 const STDERR_CAP = 8192;
 const CALL_TOOL_MAX_TIMEOUT = 300000;
 const TERMINATE_TIMEOUT = 5000;
@@ -309,51 +310,25 @@ export async function testServer(server: DiscoveredServer, timeoutMs = 20000): P
 
 export function createTransport(server: DiscoveredServer) {
   const t = server.transport;
-  const substitute = (value: string) => expandEnv(replaceEditorVariables(value, server.projectDir));
   if (t.kind === "stdio") {
     if (!t.command.trim()) {
       throw new Error("This server has no command to launch.");
     }
+    const plan = planStdioLaunch(t, server.projectDir, "throw");
     return new StdioClientTransport({
-      command: substitute(t.command),
-      args: t.args.map(substitute),
-      env: mapValues(t.env, substitute),
-      cwd: resolveCwd(server.projectDir),
+      command: spawnableCommand(plan.command, plan.executable, plan.cwd),
+      args: plan.args,
+      env: plan.env,
+      cwd: plan.cwd,
       stderr: "pipe",
     });
   }
+  const substitute = (value: string) => substituteVariables(value, server.projectDir, "throw");
   const url = new URL(substitute(t.url));
   const requestInit = { headers: mapValues(t.headers, substitute) };
   return t.kind === "sse"
     ? new SSEClientTransport(url, { requestInit })
     : new StreamableHTTPClientTransport(url, { requestInit });
-}
-
-function replaceEditorVariables(value: string, projectDir: string | undefined): string {
-  return value
-    .replace(/\$\{workspaceFolder\}/g, () => projectDir ?? "")
-    .replace(/\$\{userHome\}/g, () => os.homedir());
-}
-
-function resolveCwd(dir: string | undefined): string | undefined {
-  if (!dir) {
-    return undefined;
-  }
-  try {
-    return fs.statSync(dir).isDirectory() ? dir : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function expandEnv(value: string): string {
-  return value.replace(/\$\{(?:env:)?([A-Z0-9_()]+)\}/gi, (_whole, name: string) => {
-    const resolved = process.env[name];
-    if (resolved === undefined) {
-      throw new Error(`Environment variable ${name} is referenced but not set.`);
-    }
-    return resolved;
-  });
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -362,14 +337,6 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
     timer = setTimeout(() => reject(new Error(message)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-function mapValues(obj: Record<string, string>, fn: (value: string) => string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k] = fn(v);
-  }
-  return out;
 }
 
 function toSummary(tool: { name: string; description?: string; inputSchema: unknown }): ToolSummary {

@@ -3,6 +3,7 @@
 .cursor/**
 .mcp.json
 .handoff/**
+media/screenshots/**
 src/**
 test/**
 **/*.map

@@ -15,9 +15,31 @@ export class EventEmitter {
   }
 }
 
+function recorder() {
+  globalThis.__mcpwbVscode ??= { warnings: [], choices: [], commands: [] };
+  return globalThis.__mcpwbVscode;
+}
+
+export const window = {
+  async showWarningMessage(message, ...rest) {
+    const state = recorder();
+    state.warnings.push({ message, rest });
+    return state.choices.shift();
+  },
+};
+
+export const commands = {
+  async executeCommand(command, ...args) {
+    recorder().commands.push({ command, args });
+  },
+};
+
 export const workspace = {
   get workspaceFolders() {
     return JSON.parse(process.env.MCPWB_TEST_FOLDERS || "[]").map((p) => ({ uri: { fsPath: p } }));
+  },
+  get isTrusted() {
+    return process.env.MCPWB_TEST_UNTRUSTED !== "1";
   },
   getConfiguration() {
     return {

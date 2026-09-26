@@ -4,6 +4,35 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-09-26
+
+### Added
+
+- MCP Workbench now works in Restricted Mode. Configs are still discovered and validated, but nothing that runs from an untrusted workspace is launched, including your own servers set up to run in that folder.
+- A new `env-code-injection` security rule flags environment variables that load extra code before a server starts, such as `NODE_OPTIONS` with `--require`, `LD_PRELOAD`, `BASH_ENV`, or `DOTNET_STARTUP_HOOKS`, and variables that point the package installer at a different registry, such as `npm_config_registry`, `PIP_INDEX_URL`, or `UV_INDEX_URL`.
+- A new **MCP Workbench: Reset Launch Trust** command forgets every launch approval in the current workspace.
+
+### Security
+
+- Before a server defined by a workspace launches or connects, the prompt now shows the program and where it resolves on Windows, each argument on its own line, the environment, the headers, and which values will be filled in from your machine. Hidden and direction-changing characters are shown escaped, and long values are shortened with a marker.
+- "Always allow" now remembers a server's exact configuration and asks again whenever what would run changes. Earlier workspace-wide approvals are cleared, so each workspace server asks once more.
+- On Windows, a bare command such as `npx` is now resolved from your PATH before the project folder, so a same-named file committed to a repository can't stand in for the real program.
+- The security settings are now read from user settings only, so a repository's workspace settings can't switch the checks off.
+- The hardcoded-secret check now recognizes GitLab, Stripe, Google, Hugging Face, and npm tokens and JSON Web Tokens. It also looks in the command and the URL, and flags literal credentials under fields such as `Authorization` or `*_API_KEY`.
+
+### Fixed
+
+- A config path that exists but can't be read is now reported as `read-failed` instead of as invalid JSON.
+- Variable references are now expanded in a single pass, so a value filled in from one variable is never expanded a second time.
+- Secret warnings are now worded for the file they appear in, so user-level config files are no longer told not to commit the value.
+- Validation stays fast on configs with extremely long values.
+
+### Changed
+
+- The MCP SDK is updated to 1.30.1.
+- The published package is smaller, because README screenshots are no longer bundled and the icon is now 256 by 256 pixels.
+- Releases are now tested and built in a separate step from publishing, and every push and pull request runs the typecheck and tests on Windows and Linux.
+
 ## [0.4.7] - 2026-07-19
 
 ### Added

@@ -5,69 +5,111 @@ on:
     tags:
       - 'v*.*.*'
 
+permissions: {}
+
 jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Check release metadata
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "::error title=Version mismatch::Tag $GITHUB_REF_NAME does not match package.json version $PACKAGE_VERSION."
+            exit 1
+          fi
+          case "$VERSION" in
+            *-*)
+              echo "::error title=Prerelease tag::The VS Code Marketplace does not accept semver prerelease versions like $VERSION."
+              exit 1
+              ;;
+          esac
+          if ! grep -qF "## [$VERSION]" CHANGELOG.md; then
+            echo "::error title=Missing changelog::CHANGELOG.md has no ## [$VERSION] section."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test
+        run: npm test
+
+      - name: Package VSIX
+        run: npx vsce package --out extension.vsix
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vsix
+          path: extension.vsix
+          if-no-files-found: error
+
   publish:
+    needs: build
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
 
-    env:
-      OVSX_PAT: ${{ secrets.OVSX_PAT }}
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install publishing tools
+        run: npm ci --ignore-scripts
 
-      - name: Package VSIX
-        run: npx --yes @vscode/vsce package --out extension.vsix
+      - name: Download VSIX
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: vsix
 
-      - name: Publish to Open VSX (skip if version already published)
-        if: env.OVSX_PAT != ''
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
-          set +e
-          OUT=$(npx --yes ovsx publish extension.vsix -p "$OVSX_PAT" 2>&1)
-          CODE=$?
-          echo "$OUT"
-          if [ $CODE -ne 0 ]; then
-            if echo "$OUT" | grep -qiE "already (exists|published)|is already|same version"; then
-              echo "::notice title=Open VSX::Version already published - skipping."
-              exit 0
-            fi
-            echo "::error title=Open VSX::Publish failed for a reason other than a duplicate version."
-            exit $CODE
+          if [ -z "$OVSX_PAT" ]; then
+            echo "::notice title=Open VSX::OVSX_PAT is not set - skipping."
+            exit 0
           fi
-          echo "Published to Open VSX."
+          npx ovsx publish extension.vsix --skip-duplicate
 
-      - name: Publish to VS Code Marketplace (skip if version already published)
-        if: env.VSCE_PAT != ''
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
-          set +e
-          OUT=$(npx --yes @vscode/vsce publish --packagePath extension.vsix -p "$VSCE_PAT" 2>&1)
-          CODE=$?
-          echo "$OUT"
-          if [ $CODE -ne 0 ]; then
-            if echo "$OUT" | grep -qiE "already (exists|published)|same version|already a version|conflict|409"; then
-              echo "::notice title=VS Code Marketplace::Version already published - skipping."
-              exit 0
-            fi
-            echo "::error title=VS Code Marketplace::Publish failed for a reason other than a duplicate version."
-            exit $CODE
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::notice title=VS Code Marketplace::VSCE_PAT is not set - skipping."
+            exit 0
           fi
-          echo "Published to VS Code Marketplace."
+          npx vsce publish --packagePath extension.vsix --skip-duplicate
 
       - name: Create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="$GITHUB_REF_NAME"
           if gh release view "$TAG" >/dev/null 2>&1; then

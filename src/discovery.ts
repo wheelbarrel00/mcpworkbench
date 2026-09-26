@@ -11,21 +11,23 @@ import {
   McpTransport,
   ScannedFile,
 } from "./types";
+import { referencedEnvironmentVariables } from "./substitution";
+
+export { referencedEditorVariables, referencedEnvironmentVariables } from "./substitution";
+
+type ConfigScope = "global" | "workspace";
 
 interface ConfigLocation {
   source: McpSource;
   rootKey: "servers" | "mcpServers";
   resolve: (workspaceFolder?: string) => string | undefined;
-  scoped: "global" | "workspace";
+  scoped: ConfigScope;
   includeProjects?: boolean;
   serversOptional?: boolean;
   strict?: boolean;
 }
 
 const home = os.homedir();
-
-const ENV_REFERENCE = /\$\{(env:)?([A-Z0-9_()]+)\}/gi;
-const EDITOR_VARIABLE_NAMES = new Set(["workspaceFolder", "userHome"]);
 
 function appDataRoot(): string | undefined {
   if (process.platform === "win32") {
@@ -106,7 +108,7 @@ function readConfigText(p: string): string {
   return buf.toString("utf8");
 }
 
-function normalizeTransport(entry: any): {
+function normalizeTransport(entry: any, scoped: ConfigScope): {
   transport: McpTransport | undefined;
   issues: ConfigIssue[];
 } {
@@ -129,12 +131,13 @@ function normalizeTransport(entry: any): {
       });
     }
     addUnpinnedLauncherIssue(entry.command, args, issues);
+    addSecretIssue(entry.command, ["command"], issues, scoped);
     rawArgs.forEach((arg, i) => {
       if (typeof arg !== "string") {
         return;
       }
       addShellInjectionIssue(arg, i, issues);
-      addSecretIssue(arg, ["args", i], issues);
+      addSecretIssue(arg, ["args", i], issues, scoped);
     });
     if (isEncodedPowerShell(entry.command, args)) {
       const idx = rawArgs.findIndex((a) => typeof a === "string" && /^-e(nc(odedcommand)?)?$/i.test(a));
@@ -146,7 +149,8 @@ function normalizeTransport(entry: any): {
       });
     }
     for (const [key, value] of Object.entries(env)) {
-      addSecretIssue(value, ["env", key], issues);
+      addSecretIssue(value, ["env", key], issues, scoped, key);
+      addCodeLoadingEnvIssue(key, value, issues);
     }
     issues.push(...missingEnvIssues(env, ["env"]));
     return { transport: { kind: "stdio", command: entry.command, args, env }, issues };
@@ -156,9 +160,13 @@ function normalizeTransport(entry: any): {
     const headers = stringRecord(entry.headers, "header", ["headers"], issues);
     const t = String(entry.type ?? "").toLowerCase();
     const kind: "http" | "sse" = t === "sse" ? "sse" : "http";
-    issues.push(...urlIssues(entry.url));
+    const urlChecks = urlIssues(entry.url);
+    issues.push(...urlChecks);
+    if (!urlChecks.some((issue) => issue.code === "credential-in-url")) {
+      addSecretIssue(entry.url, ["url"], issues, scoped);
+    }
     for (const [key, value] of Object.entries(headers)) {
-      addSecretIssue(value, ["headers", key], issues);
+      addSecretIssue(value, ["headers", key], issues, scoped, key);
     }
     issues.push(...missingEnvIssues(headers, ["headers"]));
     return { transport: { kind, url: entry.url, headers }, issues };
@@ -220,10 +228,16 @@ function firstPackageToken(args: string[]): string | undefined {
   return undefined;
 }
 
-const SHELL_PIPE = /\b(?:curl|wget|iwr|invoke-webrequest)\b[\s\S]*\|\s*(?:sh|bash|zsh|dash|pwsh|powershell)\b/i;
+const DOWNLOADER = /\b(?:curl|wget|iwr|invoke-webrequest)\b/i;
+const PIPE_TO_SHELL = /\|\s*(?:sh|bash|zsh|dash|pwsh|powershell)\b/i;
+
+function pipesDownloadIntoShell(arg: string): boolean {
+  const download = DOWNLOADER.exec(arg);
+  return download !== null && PIPE_TO_SHELL.test(arg.slice(download.index + download[0].length));
+}
 
 function addShellInjectionIssue(arg: string, index: number, issues: ConfigIssue[]): void {
-  if (SHELL_PIPE.test(arg)) {
+  if (pipesDownloadIntoShell(arg)) {
     issues.push({
       level: "warning",
       code: "risky-shell-pipe",
@@ -248,28 +262,121 @@ const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: "OpenAI API key", re: /\bsk-[A-Za-z0-9]{20,}/ },
   { name: "GitHub fine-grained token", re: /\bgithub_pat_[A-Za-z0-9_]{20,}/ },
   { name: "GitHub token", re: /\bgh[pousr]_[A-Za-z0-9]{20,}/ },
+  { name: "GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}/ },
   { name: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
+  { name: "Stripe live key", re: /\b(?:sk|rk)_live_[A-Za-z0-9]{16,}/ },
+  { name: "Google API key", re: /\bAIza[A-Za-z0-9_-]{35}/ },
+  { name: "Hugging Face token", re: /\bhf_[A-Za-z0-9]{30,}/ },
+  { name: "npm token", re: /\bnpm_[A-Za-z0-9]{36}/ },
   { name: "AWS access key", re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "JSON Web Token", re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
   { name: "private key", re: /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/ },
 ];
+
+const CREDENTIAL_WORDS = new Set(["token", "secret", "password", "passwd", "apikey", "pat", "credential", "credentials", "authorization"]);
+const KEY_QUALIFIERS = new Set(["api", "access", "private", "secret"]);
+const NON_SECRET_SUFFIXES = new Set([
+  "path", "file", "dir", "url", "uri", "id", "name", "audience", "endpoint", "host", "type", "header", "model", "version",
+]);
+const CREDENTIAL_CHARACTERS = /^[A-Za-z0-9._~+\/=-]+$/;
+const STANDARD_BASE64 = /^[A-Za-z0-9+\/]+={0,2}$/;
+const FILE_NAME = /\.(?:json|pem|key|p12|pfx|crt|cer|txt|env|ya?ml)$/i;
+
+const SECRET_ADVICE: Record<ConfigScope, string> = {
+  workspace: "reference it from your environment as ${VAR} so the secret isn't committed with the repo.",
+  global: "it sits in plain text in this file. Where the client supports it, reference an environment variable as ${VAR} instead.",
+};
 
 function matchSecret(value: string): string | undefined {
   return SECRET_PATTERNS.find((p) => p.re.test(value))?.name;
 }
 
-function addSecretIssue(value: string, path: JsonPath, issues: ConfigIssue[]): void {
+function isCredentialField(field: string): boolean {
+  const words = field
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  if (words.length === 0 || NON_SECRET_SUFFIXES.has(words[words.length - 1])) {
+    return false;
+  }
+  return words.some((word, i) => CREDENTIAL_WORDS.has(word) || (word === "key" && KEY_QUALIFIERS.has(words[i - 1])));
+}
+
+function looksLikeCredential(value: string): boolean {
+  const token = value.trim().replace(/^(?:bearer|basic|token)\s+/i, "");
+  if (token.length < 16 || !CREDENTIAL_CHARACTERS.test(token) || /^[./~]/.test(token) || FILE_NAME.test(token)) {
+    return false;
+  }
+  if (!/\d/.test(token) || !/[a-z]/i.test(token)) {
+    return false;
+  }
+  return !token.includes("/") || STANDARD_BASE64.test(token);
+}
+
+function addSecretIssue(value: string, path: JsonPath, issues: ConfigIssue[], scoped: ConfigScope, field?: string): void {
   if (value.includes("${")) {
     return;
   }
   const name = matchSecret(value);
-  if (name) {
-    issues.push({
-      level: "warning",
-      code: "hardcoded-secret",
-      message: `Looks like a hardcoded ${name}; store it in an environment variable and reference it as \${VAR} instead of committing the literal.`,
-      path,
-    });
+  const literalCredential = !name && field !== undefined && isCredentialField(field) && looksLikeCredential(value);
+  if (!name && !literalCredential) {
+    return;
   }
+  const finding = name ? `Looks like a hardcoded ${name}` : `"${field}" holds a literal credential`;
+  issues.push({
+    level: "warning",
+    code: "hardcoded-secret",
+    message: `${finding}; ${SECRET_ADVICE[scoped]}`,
+    path,
+  });
+}
+
+const PRELOAD_FLAG = /(?:^|\s)(?:--require|-r|--import|--loader|--experimental-loader)(?=[\s=]|$)/;
+const JAVA_AGENT_FLAG = /-(?:javaagent|agentpath|agentlib):/;
+const hasValue = (value: string) => value.trim() !== "";
+
+function nodePreloads(value: string): boolean {
+  const normalized = value.replace(/["']/g, "").replace(/--[\w-]+/g, (flag) => flag.replace(/_/g, "-"));
+  return PRELOAD_FLAG.test(normalized);
+}
+
+const LOADS_CODE = "makes the runtime load extra code before the server starts, and that code runs with your permissions";
+const CHANGES_REGISTRY = "points the package installer at a different registry, so the server's code can come from somewhere else";
+
+const CODE_LOADING_ENV = new Map<string, { applies: (value: string) => boolean; effect: string }>([
+  ["NODE_OPTIONS", { applies: nodePreloads, effect: LOADS_CODE }],
+  ["LD_PRELOAD", { applies: hasValue, effect: LOADS_CODE }],
+  ["DYLD_INSERT_LIBRARIES", { applies: hasValue, effect: LOADS_CODE }],
+  ["BASH_ENV", { applies: hasValue, effect: LOADS_CODE }],
+  ["DOTNET_STARTUP_HOOKS", { applies: hasValue, effect: LOADS_CODE }],
+  ["PERL5OPT", { applies: (value) => /(?:^|\s)-?[MmdI]/.test(value), effect: LOADS_CODE }],
+  ["RUBYOPT", { applies: (value) => /(?:^|\s)-?[rI]/.test(value), effect: LOADS_CODE }],
+  ["JAVA_TOOL_OPTIONS", { applies: (value) => JAVA_AGENT_FLAG.test(value), effect: LOADS_CODE }],
+  ["_JAVA_OPTIONS", { applies: (value) => JAVA_AGENT_FLAG.test(value), effect: LOADS_CODE }],
+  ["JDK_JAVA_OPTIONS", { applies: (value) => JAVA_AGENT_FLAG.test(value) || /(?:^|\s)@/.test(value), effect: LOADS_CODE }],
+  ["NPM_CONFIG_REGISTRY", { applies: hasValue, effect: CHANGES_REGISTRY }],
+  ["PIP_INDEX_URL", { applies: hasValue, effect: CHANGES_REGISTRY }],
+  ["PIP_EXTRA_INDEX_URL", { applies: hasValue, effect: CHANGES_REGISTRY }],
+  ["UV_INDEX_URL", { applies: hasValue, effect: CHANGES_REGISTRY }],
+  ["UV_EXTRA_INDEX_URL", { applies: hasValue, effect: CHANGES_REGISTRY }],
+  ["UV_DEFAULT_INDEX", { applies: hasValue, effect: CHANGES_REGISTRY }],
+]);
+
+function addCodeLoadingEnvIssue(key: string, value: string, issues: ConfigIssue[]): void {
+  const separator = key.indexOf("=");
+  const name = separator > 0 ? key.slice(0, separator) : key;
+  const effectiveValue = separator > 0 ? `${key.slice(separator + 1)}=${value}` : value;
+  const rule = CODE_LOADING_ENV.get(name.toUpperCase());
+  if (!rule?.applies(effectiveValue)) {
+    return;
+  }
+  issues.push({
+    level: "warning",
+    code: "env-code-injection",
+    message: `${name} ${rule.effect}. Confirm it's intentional.`,
+    path: ["env", key],
+  });
 }
 
 const SENSITIVE_URL_PARAMS = ["token", "secret", "apikey", "api_key", "access_token", "key", "password", "auth"];
@@ -327,12 +434,7 @@ function missingEnvIssues(obj: Record<string, string>, basePath: JsonPath): Conf
   const issues: ConfigIssue[] = [];
   const seen = new Set<string>();
   for (const [key, value] of Object.entries(obj)) {
-    for (const m of value.matchAll(ENV_REFERENCE)) {
-      const prefixed = m[1] !== undefined;
-      const name = m[2];
-      if (!prefixed && EDITOR_VARIABLE_NAMES.has(name)) {
-        continue;
-      }
+    for (const name of referencedEnvironmentVariables(value)) {
       if (process.env[name] === undefined && !seen.has(name)) {
         seen.add(name);
         issues.push({
@@ -390,6 +492,7 @@ const SECURITY_CODES = new Set([
   "insecure-remote-transport",
   "risky-shell-pipe",
   "encoded-powershell",
+  "env-code-injection",
   "metadata-endpoint",
   "unpinned-launcher",
 ]);
@@ -431,9 +534,21 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
   if (!p || !fs.existsSync(p)) return result;
   result.exists = true;
 
+  let text: string;
+  try {
+    text = readConfigText(p);
+  } catch (e) {
+    result.fileIssues.push({
+      level: "error",
+      code: "read-failed",
+      message: `Could not read this file: ${(e as Error).message}`,
+    });
+    return result;
+  }
+
   let parsed: any;
   try {
-    parsed = parseConfig(readConfigText(p), loc.strict ?? false);
+    parsed = parseConfig(text, loc.strict ?? false);
   } catch (e) {
     result.fileIssues.push({
       level: "error",
@@ -480,7 +595,7 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
   for (const { entries, scope, basePath } of blocks) {
     for (const [name, entry] of Object.entries(entries)) {
       total++;
-      const { transport, issues } = normalizeTransport(entry);
+      const { transport, issues } = normalizeTransport(entry, loc.scoped);
       const serverPath: JsonPath = [...basePath, name];
       for (const issue of issues) {
         issue.path = issue.path ? [...serverPath, ...issue.path] : serverPath;

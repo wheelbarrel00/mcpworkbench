@@ -701,3 +701,69 @@ test("an SSE server that never sends endpoint times out instead of hanging", { t
     server.close();
   }
 });
+
+test("on Windows a bare command is launched by its PATH location, not a same-named file in the project", () => {
+  const bin = mkTemp("mcpwb-bin-");
+  const project = mkTemp("mcpwb-proj-");
+  fs.writeFileSync(path.join(bin, "mcpwbtool.cmd"), "@echo off\n");
+  fs.writeFileSync(path.join(project, "mcpwbtool.cmd"), "@echo off\n");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const savedPath = process.env.PATH;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  process.env.PATH = bin;
+  try {
+    const transport = createTransport({
+      name: "shadowed",
+      source: "claude-code-workspace",
+      configPath: path.join(project, ".mcp.json"),
+      projectDir: project,
+      transport: { kind: "stdio", command: "mcpwbtool", args: [], env: {} },
+    });
+    assert.equal(transport._serverParams.command, path.join(bin, "mcpwbtool.cmd"));
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    process.env.PATH = savedPath;
+  }
+});
+
+test("on Windows the command is resolved with the server's substituted env PATH", () => {
+  const bin = mkTemp("mcpwb-bin-");
+  fs.writeFileSync(path.join(bin, "mcpwbtool.cmd"), "@echo off\n");
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const savedPath = process.env.PATH;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  process.env.PATH = mkTemp("mcpwb-empty-");
+  process.env.MCPWB_BIN = bin;
+  try {
+    const transport = createTransport({
+      name: "via-env-path",
+      source: "claude-code-workspace",
+      configPath: path.join(bin, ".mcp.json"),
+      transport: { kind: "stdio", command: "mcpwbtool", args: [], env: { Path: "${env:MCPWB_BIN}" } },
+    });
+    assert.equal(transport._serverParams.command, path.join(bin, "mcpwbtool.cmd"));
+    assert.equal(transport._serverParams.env.Path, bin);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    process.env.PATH = savedPath;
+    delete process.env.MCPWB_BIN;
+  }
+});
+
+test("a substituted value is never expanded a second time", () => {
+  const project = path.join(mkTemp("mcpwb-proj-"), "ws-${MCPWB_SECOND_PASS}");
+  fs.mkdirSync(project);
+  process.env.MCPWB_SECOND_PASS = "leaked";
+  try {
+    const transport = createTransport({
+      name: "second-pass",
+      source: "claude-code-workspace",
+      configPath: path.join(project, ".mcp.json"),
+      projectDir: project,
+      transport: { kind: "stdio", command: "node", args: ["${workspaceFolder}"], env: {} },
+    });
+    assert.equal(transport._serverParams.args[0], project);
+  } finally {
+    delete process.env.MCPWB_SECOND_PASS;
+  }
+});

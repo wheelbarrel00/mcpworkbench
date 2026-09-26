@@ -2,7 +2,19 @@
   "name": "mcp-workbench-wb00",
   "displayName": "MCP Workbench: Discover & Test",
   "description": "Discover, validate, and test every MCP server across Cursor, VS Code, and Claude — in one place.",
-  "version": "0.4.7",
+  "keywords": [
+    "mcp",
+    "model context protocol",
+    "mcp server",
+    "mcp client",
+    "claude",
+    "claude code",
+    "cursor",
+    "copilot",
+    "validation",
+    "security"
+  ],
+  "version": "0.4.8",
   "license": "MIT",
   "sponsor": {
     "url": "https://github.com/sponsors/wheelbarrel00"
@@ -13,6 +25,10 @@
     "type": "git",
     "url": "https://github.com/wheelbarrel00/mcpworkbench.git"
   },
+  "bugs": {
+    "url": "https://github.com/wheelbarrel00/mcpworkbench/issues"
+  },
+  "homepage": "https://github.com/wheelbarrel00/mcpworkbench#readme",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -24,6 +40,12 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode, MCP Workbench still discovers and validates MCP configs, but it will not launch or connect to servers that run from the workspace."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -61,6 +83,10 @@
         "command": "mcpWorkbench.testConnection",
         "title": "MCP Workbench: Test Connection",
         "icon": "$(plug)"
+      },
+      {
+        "command": "mcpWorkbench.resetLaunchTrust",
+        "title": "MCP Workbench: Reset Launch Trust"
       }
     ],
     "menus": {
@@ -112,13 +138,15 @@
         },
         "mcpWorkbench.security.enabled": {
           "type": "boolean",
+          "scope": "application",
           "default": true,
-          "description": "Run the security & correctness checks (hardcoded secrets, credentials in URLs, plaintext http:// remotes, unpinned launchers, shell-pipe bootstrap chains, cloud-metadata endpoints). Turn off to show only the structural configuration checks."
+          "description": "Run the security & correctness checks (hardcoded secrets, credentials in URLs, plaintext http:// remotes, unpinned launchers, shell-pipe bootstrap chains, encoded PowerShell, code-loading and registry-redirecting environment variables, cloud-metadata endpoints). Turn off to show only the structural configuration checks. Read from user settings only, so a workspace cannot switch it off."
         },
         "mcpWorkbench.security.ruleSeverity": {
           "type": "object",
+          "scope": "application",
           "default": {},
-          "markdownDescription": "Override the severity of individual security rules. Keys are rule ids; values are `off`, `info`, `warning`, or `error`. Example: `{ \"unpinned-launcher\": \"off\", \"hardcoded-secret\": \"error\" }`. Ids: `hardcoded-secret`, `credential-in-url`, `insecure-remote-transport`, `risky-shell-pipe`, `encoded-powershell`, `metadata-endpoint`, `unpinned-launcher`.",
+          "markdownDescription": "Override the severity of individual security rules. Keys are rule ids; values are `off`, `info`, `warning`, or `error`. Example: `{ \"unpinned-launcher\": \"off\", \"hardcoded-secret\": \"error\" }`. Ids: `hardcoded-secret`, `credential-in-url`, `insecure-remote-transport`, `risky-shell-pipe`, `encoded-powershell`, `env-code-injection`, `metadata-endpoint`, `unpinned-launcher`. Read from user settings only, so a workspace cannot retune it.",
           "additionalProperties": {
             "type": "string",
             "enum": [
@@ -139,17 +167,19 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "build": "node esbuild.js --production",
     "vscode:prepublish": "npm run typecheck && npm run build",
-    "package": "npx @vscode/vsce package"
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "4.0.0",
     "esbuild": "^0.28.1",
     "jsdom": "^29.1.1",
+    "ovsx": "1.2.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.1",
     "jsonc-parser": "^3.3.1"
   }
 }
