@@ -1,11 +1,14 @@
 import * as vscode from "vscode";
 import { randomBytes } from "crypto";
-import { DiscoveredServer } from "./types";
-import { openSession, McpSession, TestFailure, TestSuccess, ToolSummary } from "./mcpClient";
+import { editorFor } from "./editors";
+import { DiscoveredServer, InputValues } from "./types";
+import { ListProblem, fellBackToSse, openSession, McpSession, TestFailure, TestSuccess, ToolSummary } from "./mcpClient";
+import { unsetEnvironmentNames, unsetNotice } from "./substitution";
 
 let panel: vscode.WebviewPanel | undefined;
 let session: McpSession | undefined;
 let seq = 0;
+let closedBeforeReady: number | undefined;
 
 const MAX_OUTPUT = 100000;
 const MAX_WIRE_TEXT = MAX_OUTPUT * 2;
@@ -33,7 +36,7 @@ function capValue(value: unknown, depth: number): unknown {
   return value;
 }
 
-export async function showTester(server: DiscoveredServer): Promise<void> {
+export async function showTester(server: DiscoveredServer, inputs?: InputValues): Promise<void> {
   if (!panel) {
     panel = vscode.window.createWebviewPanel(
       "mcpWorkbench.tester",
@@ -49,6 +52,7 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
   }
 
   const myId = ++seq;
+  closedBeforeReady = undefined;
   await disposeSession();
   if (!panel || myId !== seq) {
     return;
@@ -57,7 +61,7 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
   panel.reveal(vscode.ViewColumn.Active);
   panel.webview.html = page(server.name, header(server, `<p class="status">Connecting…</p>`));
 
-  const opened = await openSession(server, undefined, () => handleClosed(myId));
+  const opened = await openSession(server, undefined, { onClosed: () => handleClosed(myId), inputs });
   if (!panel || myId !== seq) {
     if (opened.ok) {
       await opened.session.dispose();
@@ -68,14 +72,19 @@ export async function showTester(server: DiscoveredServer): Promise<void> {
     panel.webview.html = page(server.name, failureBody(server, opened));
     return;
   }
+  if (closedBeforeReady === myId) {
+    await opened.session.dispose();
+    panel.webview.html = page(server.name, header(server, `<p class="status fail">⚠ The server disconnected while the tester was loading it. Reopen the tester to reconnect.</p>`));
+    return;
+  }
 
   session = opened.session;
   const info = opened.session.info;
   panel.webview.html = page(
     server.name,
-    header(server, `<p class="status ok">✓ Connected</p>`) +
+    header(server, connectedStatus(server, info)) +
       serverSection(info) +
-      toolsSection(info.tools) +
+      toolsSection(info) +
       resourcesSection(info) +
       promptsSection(info),
     nonce(),
@@ -98,6 +107,10 @@ async function disposeSession(): Promise<void> {
 }
 
 function handleClosed(id: number): void {
+  if (id === seq && !session) {
+    closedBeforeReady = id;
+    return;
+  }
   if (id !== seq || !session || !panel) {
     return;
   }
@@ -227,8 +240,33 @@ function header(server: DiscoveredServer, status: string): string {
     <span class="badge">${esc(server.source)}</span>
   </div>
   <code class="target">${esc(target(server))}</code>
+  ${unsetNote(server)}
   ${status}
 </header>`;
+}
+
+function unsetNote(server: DiscoveredServer): string {
+  const names = unsetEnvironmentNames(server);
+  if (!names.length) {
+    return "";
+  }
+  return `<p class="hint">${unsetNotice(esc(names.join(", ")), names.length, editorFor(server.source))}</p>`;
+}
+
+function connectedStatus(server: DiscoveredServer, info: TestSuccess): string {
+  if (fellBackToSse(server, info.connectedOver)) {
+    return `<p class="status ok">✓ Connected over SSE</p>
+  <p class="hint">The server refused Streamable HTTP, so the tester fell back to SSE the way editors do.</p>`;
+  }
+  return `<p class="status ok">✓ Connected</p>`;
+}
+
+function listNote(problem: ListProblem | undefined, noun: string, shown: number): string {
+  if (problem?.error !== undefined) {
+    const outcome = shown ? `stopped after ${shown} ${noun}` : "failed";
+    return `<p class="list-error">Listing ${noun} ${outcome}: ${esc(problem.error)}</p>`;
+  }
+  return problem?.truncated ? `<p class="hint">Showing the first ${shown} ${noun}. The server has more than the tester loads.</p>` : "";
 }
 
 function serverSection(result: TestSuccess): string {
@@ -247,12 +285,15 @@ function serverSection(result: TestSuccess): string {
 </section>`;
 }
 
-function toolsSection(tools: ToolSummary[]): string {
+export function toolsSection(info: TestSuccess): string {
+  const { tools } = info;
+  const note = listNote(info.listProblems.tools, "tools", tools.length);
   if (!tools.length) {
-    return `<section><h2>Tools</h2><p class="muted">This server exposes no tools.</p></section>`;
+    return `<section><h2>Tools</h2>${note || `<p class="muted">This server exposes no tools.</p>`}</section>`;
   }
   const items = tools.map((t, i) => toolItem(t, i)).join("");
   return `<section><h2>Tools <span class="count">${tools.length}</span></h2>
+  ${note}
   <p class="muted">Fill in the arguments, then run the tool against the live server. Switch to JSON for advanced edits.</p>
   <ul class="tools">${items}</ul></section>`;
 }
@@ -486,10 +527,13 @@ export function toolItem(t: ToolSummary, i: number): string {
     </li>`;
 }
 
-function resourcesSection(info: TestSuccess): string {
+export function resourcesSection(info: TestSuccess): string {
   const { resources, resourceTemplates } = info;
+  const notes =
+    listNote(info.listProblems.resources, "resources", resources.length) +
+    listNote(info.listProblems.resourceTemplates, "resource templates", resourceTemplates.length);
   if (!resources.length && !resourceTemplates.length) {
-    return "";
+    return notes ? `<section><h2>Resources</h2>${notes}</section>` : "";
   }
   const fixed = resources
     .map(
@@ -518,13 +562,15 @@ function resourcesSection(info: TestSuccess): string {
     .join("");
   const count = resources.length + resourceTemplates.length;
   return `<section><h2>Resources <span class="count">${count}</span></h2>
+  ${notes}
   <p class="muted">Read a resource's contents from the live server. Fill in any variables in a template URI before reading.</p>
   <ul class="tools">${fixed}${templates}</ul></section>`;
 }
 
-function promptsSection(info: TestSuccess): string {
+export function promptsSection(info: TestSuccess): string {
+  const note = listNote(info.listProblems.prompts, "prompts", info.prompts.length);
   if (!info.prompts.length) {
-    return "";
+    return note ? `<section><h2>Prompts</h2>${note}</section>` : "";
   }
   const items = info.prompts
     .map((p, i) => {
@@ -544,6 +590,7 @@ function promptsSection(info: TestSuccess): string {
     })
     .join("");
   return `<section><h2>Prompts <span class="count">${info.prompts.length}</span></h2>
+  ${note}
   <p class="muted">Fetch a prompt's messages from the live server, filling in any arguments.</p>
   <ul class="tools">${items}</ul></section>`;
 }
@@ -967,6 +1014,7 @@ dd { margin: 0; }
 .error { border-left: 3px solid var(--vscode-errorForeground); padding: 8px 12px; background: var(--vscode-inputValidation-errorBackground, rgba(255,0,0,0.06)); }
 .detail { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin: 6px 0 0; }
 .hint, .muted { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+.list-error { color: var(--vscode-errorForeground); font-size: 0.9em; }
 .tools { list-style: none; padding: 0; margin: 0; }
 .tools li { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
 .tool-name { font-weight: 600; font-family: var(--vscode-editor-font-family); }

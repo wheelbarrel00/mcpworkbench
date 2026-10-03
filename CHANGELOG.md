@@ -4,6 +4,43 @@ All notable changes to MCP Workbench are documented in this file. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] - 2026-10-02
+
+### Added
+
+- The tester now reads variables the way each editor does. Claude Code configs expand `${VAR}` and `${VAR:-default}`. VS Code and Cursor configs expand `${env:VAR}` and their folder, home, and path-separator variables. Claude Desktop configs expand nothing. Anything the editor would leave as written now reaches the server as written.
+- VS Code `${input:...}` values are asked for when a server launches, after the launch prompt, with password inputs masked.
+- An `http` server that refuses Streamable HTTP is retried over SSE, the way VS Code and Claude Code fall back. The tester and Test Connection say when this happens.
+- Tools, resources, resource templates, and prompts are now loaded across pages, up to 50 pages or 2,000 items each, and the tester says when a list was cut short.
+- New checks: `variable-not-expanded` for a `${...}` the editor passes through as written, `credential-blanked` for a credential Claude Code reads as empty in a remote server's url or headers, `input-undefined` for a VS Code input with no definition, `variable-unsupported` for a variable the tester can't fill in, and `missing-type` for a Claude Code url entry with no `type`, which Claude Code skips.
+- When MCP Workbench runs in VS Code Insiders, VSCodium, or a portable install, it reads that install's own default-profile `mcp.json`.
+
+### Changed
+
+- Local servers now get your full environment, as they do in editors, so a server behind a proxy or one that reads a token from your shell works in the tester. Claude Desktop servers still get only Claude Desktop's small default set. The launch prompt says when a program inherits your environment.
+- Claude Code servers are given `CLAUDE_PROJECT_DIR` and `CLAUDECODE`, as Claude Code does.
+- An environment variable that isn't set no longer stops a launch, unless it's in the command. It reaches the server as written in Claude Code configs and as an empty value in VS Code and Cursor configs, matching the editor, and the launch prompt and the tester list it.
+- In Claude Code configs, `${workspaceFolder}` and `${userHome}` are no longer filled in, because Claude Code reads them as environment variables. Use `${CLAUDE_PROJECT_DIR:-.}` for the project folder.
+- `${workspaceFolder}` in a VS Code user config or a global Cursor config is no longer replaced with an empty path. The tester now says it can't fill it in.
+- The `env-unset` check now also covers the command, arguments, and url, and follows each editor's variable syntax.
+- When Test Connection times out on a launcher such as `npx`, the details now explain that the first run may still be downloading the package.
+- The secret warnings suggest each editor's own variable syntax.
+
+### Security
+
+- Inputs are asked for only after the launch prompt is accepted. If a value you enter makes the program resolve through the workspace folder, you're asked to confirm that separately.
+- "Always allow" now also remembers a server's input definitions, so changing an input's options or default asks again. Servers approved in 0.4.8 ask once more, because the environment rules changed.
+- A command that still contains `${` after its variables are filled in is never run, so a repository file named like an unexpanded variable can't run in its place.
+- In a Claude Code remote server's url and headers, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `AWS_BEARER_TOKEN_BEDROCK`, `HTTPS_PROXY`, and `NPM_TOKEN` are sent empty, as Claude Code does.
+
+### Fixed
+
+- On Windows, a server started through a `.cmd` launcher such as `npx` is now stopped when its connection fails or times out, instead of being left running.
+- A failing list request is shown as an error in the tester instead of as an empty list, and a server that has resources but no resource templates no longer shows an error.
+- Tools on every page keep their output-schema validation.
+- If a server exits while the tester is still loading it, the tester now says it disconnected instead of showing it as connected.
+- On Windows, a Claude Desktop config's own `PATH` is no longer replaced by the default one.
+
 ## [0.4.8] - 2026-09-26
 
 ### Added

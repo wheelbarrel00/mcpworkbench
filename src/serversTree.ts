@@ -45,6 +45,8 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
   private files: ScannedFile[] = [];
   private healthLookup?: (id: string) => HealthRecord | undefined;
 
+  constructor(private readonly vscodeUserDir?: string) {}
+
   setHealthProvider(lookup: (id: string) => HealthRecord | undefined): void {
     this.healthLookup = lookup;
   }
@@ -74,7 +76,7 @@ export class ServersProvider implements vscode.TreeDataProvider<Node> {
     const showAllClaudeProjects = config.get<boolean>("showAllClaudeProjects", false);
     const securityEnabled = config.get<boolean>("security.enabled", true);
     const ruleSeverity = config.get<Record<string, string>>("security.ruleSeverity", {});
-    this.files = discoverAll(folders, { showAllClaudeProjects, securityEnabled, ruleSeverity });
+    this.files = discoverAll(folders, { showAllClaudeProjects, securityEnabled, ruleSeverity, vscodeUserDir: this.vscodeUserDir });
     this._onDidScan.fire(this.files);
     this._onDidChange.fire();
   }

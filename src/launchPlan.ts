@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { ResolvedExecutable, resolveWindowsExecutable } from "./executable";
-import { MissingVariable, substituteVariables } from "./substitution";
+import { Unfillable, VariableScope, substituteVariables } from "./substitution";
 import { StdioTransport } from "./types";
 
 export interface StdioLaunchPlan {
@@ -11,12 +11,12 @@ export interface StdioLaunchPlan {
   executable: ResolvedExecutable | undefined;
 }
 
-export function planStdioLaunch(transport: StdioTransport, projectDir: string | undefined, missing: MissingVariable): StdioLaunchPlan {
-  const substitute = (value: string) => substituteVariables(value, projectDir, missing);
+export function planStdioLaunch(transport: StdioTransport, scope: VariableScope, unfillable: Unfillable): StdioLaunchPlan {
+  const substitute = (value: string) => substituteVariables(value, scope, unfillable);
   const command = substitute(transport.command);
   const args = transport.args.map(substitute);
   const env = mapValues(transport.env, substitute);
-  const cwd = existingDirectory(projectDir);
+  const cwd = existingDirectory(scope.projectDir);
   return { command, args, env, cwd, executable: resolveWindowsExecutable(command, env, cwd) };
 }
 

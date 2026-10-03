@@ -6,21 +6,31 @@ import type { ParseError } from "jsonc-parser";
 import {
   ConfigIssue,
   DiscoveredServer,
+  InputDefinition,
+  InputOption,
   JsonPath,
   McpSource,
   McpTransport,
   ScannedFile,
 } from "./types";
-import { referencedEnvironmentVariables } from "./substitution";
-
-export { referencedEditorVariables, referencedEnvironmentVariables } from "./substitution";
+import { EDITOR_NAMES, Editor, editorFor } from "./editors";
+import {
+  ReferenceMatch,
+  expansionSuggestion,
+  inputDefinition,
+  isEditorVariable,
+  isFolderVariable,
+  isPromptedInput,
+  isUnsetEnvironmentReference,
+  variableReferences,
+} from "./substitution";
 
 type ConfigScope = "global" | "workspace";
 
 interface ConfigLocation {
   source: McpSource;
   rootKey: "servers" | "mcpServers";
-  resolve: (workspaceFolder?: string) => string | undefined;
+  resolve: (ctx: ScanContext, workspaceFolder?: string) => string | undefined;
   scoped: ConfigScope;
   includeProjects?: boolean;
   serversOptional?: boolean;
@@ -44,24 +54,42 @@ export function claudeDesktopConfigPath(): string | undefined {
   return root ? path.join(root, "Claude", "claude_desktop_config.json") : undefined;
 }
 
-export function vscodeUserConfigPath(): string | undefined {
+export function vscodeUserConfigPath(userDir?: string): string | undefined {
+  if (userDir) {
+    return path.join(userDir, "mcp.json");
+  }
   const root = appDataRoot();
   return root ? path.join(root, "Code", "User", "mcp.json") : undefined;
+}
+
+const VSCODE_FAMILY_SCHEME = /^(?:vscode|vscodium|code-oss)/;
+const LOCAL_STORAGE_SCHEMES = new Set(["file", "vscode-userdata"]);
+
+interface StorageLocation {
+  scheme: string;
+  fsPath: string;
+}
+
+export function vscodeUserDirFromHost(globalStorage: StorageLocation, uriScheme: string): string | undefined {
+  if (!VSCODE_FAMILY_SCHEME.test(uriScheme) || !LOCAL_STORAGE_SCHEMES.has(globalStorage.scheme)) {
+    return undefined;
+  }
+  return path.dirname(path.dirname(globalStorage.fsPath)).replace(/^[a-z](?=:)/, (drive) => drive.toUpperCase());
 }
 
 const LOCATIONS: ConfigLocation[] = [
   { source: "cursor-global", rootKey: "mcpServers", scoped: "global",
     resolve: () => path.join(home, ".cursor", "mcp.json") },
   { source: "cursor-workspace", rootKey: "mcpServers", scoped: "workspace",
-    resolve: (ws) => (ws ? path.join(ws, ".cursor", "mcp.json") : undefined) },
+    resolve: (_ctx, ws) => (ws ? path.join(ws, ".cursor", "mcp.json") : undefined) },
 
   { source: "vscode-workspace", rootKey: "servers", scoped: "workspace",
-    resolve: (ws) => (ws ? path.join(ws, ".vscode", "mcp.json") : undefined) },
+    resolve: (_ctx, ws) => (ws ? path.join(ws, ".vscode", "mcp.json") : undefined) },
   { source: "vscode-user", rootKey: "servers", scoped: "global",
-    resolve: () => vscodeUserConfigPath() },
+    resolve: (ctx) => vscodeUserConfigPath(ctx.vscodeUserDir) },
 
   { source: "claude-code-workspace", rootKey: "mcpServers", scoped: "workspace", strict: true,
-    resolve: (ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
+    resolve: (_ctx, ws) => (ws ? path.join(ws, ".mcp.json") : undefined) },
   { source: "claude-code-user", rootKey: "mcpServers", scoped: "global", includeProjects: true, serversOptional: true, strict: true,
     resolve: () => path.join(home, ".claude.json") },
 
@@ -108,11 +136,13 @@ function readConfigText(p: string): string {
   return buf.toString("utf8");
 }
 
-function normalizeTransport(entry: any, scoped: ConfigScope): {
+function normalizeTransport(entry: any, scoped: ConfigScope, file: FileContext): {
   transport: McpTransport | undefined;
   issues: ConfigIssue[];
 } {
   const issues: ConfigIssue[] = [];
+  const { editor } = file;
+  const advice = secretAdvice(scoped, editor);
 
   if (typeof entry?.command === "string") {
     const args = stringArgs(entry.args, issues);
@@ -131,13 +161,16 @@ function normalizeTransport(entry: any, scoped: ConfigScope): {
       });
     }
     addUnpinnedLauncherIssue(entry.command, args, issues);
-    addSecretIssue(entry.command, ["command"], issues, scoped);
+    addSecretIssue(entry.command, ["command"], issues, advice);
+    const variableFields: VariableField[] = [{ path: ["command"], value: entry.command }];
+    const passedToShell = SHELLS.has(baseCommandName(entry.command));
     rawArgs.forEach((arg, i) => {
       if (typeof arg !== "string") {
         return;
       }
       addShellInjectionIssue(arg, i, issues);
-      addSecretIssue(arg, ["args", i], issues, scoped);
+      addSecretIssue(arg, ["args", i], issues, advice);
+      variableFields.push({ path: ["args", i], value: arg, passedToShell });
     });
     if (isEncodedPowerShell(entry.command, args)) {
       const idx = rawArgs.findIndex((a) => typeof a === "string" && /^-e(nc(odedcommand)?)?$/i.test(a));
@@ -149,10 +182,11 @@ function normalizeTransport(entry: any, scoped: ConfigScope): {
       });
     }
     for (const [key, value] of Object.entries(env)) {
-      addSecretIssue(value, ["env", key], issues, scoped, key);
+      addSecretIssue(value, ["env", key], issues, advice, key);
       addCodeLoadingEnvIssue(key, value, issues);
+      variableFields.push({ path: ["env", key], value });
     }
-    issues.push(...missingEnvIssues(env, ["env"]));
+    issues.push(...variableIssues(variableFields, { ...file, remote: false }));
     return { transport: { kind: "stdio", command: entry.command, args, env }, issues };
   }
 
@@ -160,15 +194,25 @@ function normalizeTransport(entry: any, scoped: ConfigScope): {
     const headers = stringRecord(entry.headers, "header", ["headers"], issues);
     const t = String(entry.type ?? "").toLowerCase();
     const kind: "http" | "sse" = t === "sse" ? "sse" : "http";
+    if (editor === "claude-code" && entry.type === undefined) {
+      issues.push({
+        level: "error",
+        code: "missing-type",
+        message: 'Claude Code reads an entry without "type" as a stdio server and skips it. Add "type": "http" (or "sse" or "ws").',
+        path: ["url"],
+      });
+    }
     const urlChecks = urlIssues(entry.url);
     issues.push(...urlChecks);
     if (!urlChecks.some((issue) => issue.code === "credential-in-url")) {
-      addSecretIssue(entry.url, ["url"], issues, scoped);
+      addSecretIssue(entry.url, ["url"], issues, advice);
     }
+    const variableFields: VariableField[] = [{ path: ["url"], value: entry.url }];
     for (const [key, value] of Object.entries(headers)) {
-      addSecretIssue(value, ["headers", key], issues, scoped, key);
+      addSecretIssue(value, ["headers", key], issues, advice, key);
+      variableFields.push({ path: ["headers", key], value });
     }
-    issues.push(...missingEnvIssues(headers, ["headers"]));
+    issues.push(...variableIssues(variableFields, { ...file, remote: true }));
     return { transport: { kind, url: entry.url, headers }, issues };
   }
 
@@ -282,10 +326,22 @@ const CREDENTIAL_CHARACTERS = /^[A-Za-z0-9._~+\/=-]+$/;
 const STANDARD_BASE64 = /^[A-Za-z0-9+\/]+={0,2}$/;
 const FILE_NAME = /\.(?:json|pem|key|p12|pfx|crt|cer|txt|env|ya?ml)$/i;
 
-const SECRET_ADVICE: Record<ConfigScope, string> = {
-  workspace: "reference it from your environment as ${VAR} so the secret isn't committed with the repo.",
-  global: "it sits in plain text in this file. Where the client supports it, reference an environment variable as ${VAR} instead.",
+const REFERENCE_SYNTAX: Record<Editor, string | undefined> = {
+  "claude-code": "${VAR}",
+  vscode: "${env:VAR}",
+  cursor: "${env:VAR}",
+  "claude-desktop": undefined,
 };
+
+function secretAdvice(scoped: ConfigScope, editor: Editor): string {
+  const reference = REFERENCE_SYNTAX[editor];
+  if (!reference) {
+    return "It sits in plain text in this file.";
+  }
+  return scoped === "workspace"
+    ? `Reference it from your environment as ${reference} so the secret isn't committed with the repo.`
+    : `It sits in plain text in this file. Reference an environment variable as ${reference} instead.`;
+}
 
 function matchSecret(value: string): string | undefined {
   return SECRET_PATTERNS.find((p) => p.re.test(value))?.name;
@@ -314,7 +370,7 @@ function looksLikeCredential(value: string): boolean {
   return !token.includes("/") || STANDARD_BASE64.test(token);
 }
 
-function addSecretIssue(value: string, path: JsonPath, issues: ConfigIssue[], scoped: ConfigScope, field?: string): void {
+function addSecretIssue(value: string, path: JsonPath, issues: ConfigIssue[], advice: string, field?: string): void {
   if (value.includes("${")) {
     return;
   }
@@ -327,7 +383,7 @@ function addSecretIssue(value: string, path: JsonPath, issues: ConfigIssue[], sc
   issues.push({
     level: "warning",
     code: "hardcoded-secret",
-    message: `${finding}; ${SECRET_ADVICE[scoped]}`,
+    message: `${finding}. ${advice}`,
     path,
   });
 }
@@ -430,23 +486,112 @@ function urlIssues(rawUrl: string): ConfigIssue[] {
   return issues;
 }
 
-function missingEnvIssues(obj: Record<string, string>, basePath: JsonPath): ConfigIssue[] {
+interface FileContext {
+  editor: Editor;
+  inputs: InputDefinition[] | undefined;
+  hasFolder: boolean;
+}
+
+interface VariableContext extends FileContext {
+  remote: boolean;
+}
+
+interface VariableField {
+  path: JsonPath;
+  value: string;
+  passedToShell?: boolean;
+}
+
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell"]);
+
+function variableIssues(fields: VariableField[], context: VariableContext): ConfigIssue[] {
   const issues: ConfigIssue[] = [];
-  const seen = new Set<string>();
-  for (const [key, value] of Object.entries(obj)) {
-    for (const name of referencedEnvironmentVariables(value)) {
-      if (process.env[name] === undefined && !seen.has(name)) {
-        seen.add(name);
-        issues.push({
-          level: "warning",
-          code: "env-unset",
-          message: `References environment variable ${name}, which is not set in your environment.`,
-          path: [...basePath, key],
-        });
+  const reported = new Set<string>();
+  for (const { path: fieldPath, value, passedToShell } of fields) {
+    for (const match of variableReferences(value, context.editor, context.remote)) {
+      if (passedToShell && match.reference.kind === "literal") {
+        continue;
       }
+      const issue = variableIssue(match, context);
+      const key = issue && `${issue.code}|${referenceKey(match)}`;
+      if (!issue || !key || reported.has(key)) {
+        continue;
+      }
+      reported.add(key);
+      issues.push({ ...issue, path: fieldPath });
     }
   }
   return issues;
+}
+
+function referenceKey({ text, reference }: ReferenceMatch): string {
+  if (reference.kind !== "environment" && reference.kind !== "blanked") {
+    return text;
+  }
+  return process.platform === "win32" ? reference.name.toUpperCase() : reference.name;
+}
+
+function variableIssue({ text, body, reference }: ReferenceMatch, context: VariableContext): ConfigIssue | undefined {
+  const editorName = EDITOR_NAMES[context.editor];
+  switch (reference.kind) {
+    case "environment":
+      return isUnsetEnvironmentReference(reference)
+        ? { level: "warning", code: "env-unset", message: unsetMessage(reference.name, text, context.editor) }
+        : undefined;
+    case "blanked":
+      return {
+        level: "warning",
+        code: "credential-blanked",
+        message: `Claude Code reads ${reference.name} as empty in a remote server's url and headers, even when it's set, so the server receives no value.`,
+      };
+    case "literal":
+      return { level: "warning", code: "variable-not-expanded", message: notExpandedMessage(text, body, context.editor) };
+    case "unsupported":
+      return untestable(`Only ${editorName} can fill in ${text}`);
+    case "editor":
+      return isFolderVariable(reference.name) && !context.hasFolder
+        ? untestable(`${editorName} fills ${text} from the open folder, but this config isn't tied to one`)
+        : undefined;
+    case "input":
+      return inputIssue(text, reference.id, context);
+  }
+}
+
+function inputIssue(text: string, id: string, context: VariableContext): ConfigIssue | undefined {
+  const definition = inputDefinition(context.inputs, id);
+  if (!definition) {
+    return {
+      level: "warning",
+      code: "input-undefined",
+      message: `${text} has no matching entry under "inputs" in this file, so ${EDITOR_NAMES[context.editor]} can't start this server.`,
+    };
+  }
+  return isPromptedInput(definition.type) ? undefined : untestable(`The tester can't fill in the "${definition.type}" input behind ${text}`);
+}
+
+function untestable(reason: string): ConfigIssue {
+  return { level: "info", code: "variable-unsupported", message: `${reason}, so the tester won't launch this server.` };
+}
+
+function unsetMessage(name: string, text: string, editor: Editor): string {
+  if (editor === "claude-code" && isEditorVariable(name)) {
+    const hint = name === "workspaceFolder" ? " Use ${CLAUDE_PROJECT_DIR:-.} for the project folder." : "";
+    return `Claude Code doesn't fill in editor variables like ${text}. Claude Code reads it as an environment variable, which isn't set, so the server receives the text as written.${hint}`;
+  }
+  const unset = `References environment variable ${name}, which is not set in your environment`;
+  if (editor === "claude-code") {
+    return `${unset}, so Claude Code passes ${text} to the server as written. Set it, or add a default as \${${name}:-value}.`;
+  }
+  return `${unset}, so it reaches the server as an empty value.`;
+}
+
+function notExpandedMessage(text: string, body: string, editor: Editor): string {
+  if (editor === "claude-desktop") {
+    return `Claude Desktop doesn't expand variables, so the server receives ${text} as written.`;
+  }
+  const notExpanded = `${EDITOR_NAMES[editor]} doesn't expand ${text}, so the server receives it as written.`;
+  const suggestion = expansionSuggestion(body, editor);
+  return suggestion ? `${notExpanded} Use ${suggestion} instead.` : notExpanded;
 }
 
 function stringArgs(value: unknown, issues: ConfigIssue[]): string[] {
@@ -462,6 +607,37 @@ function stringArgs(value: unknown, issues: ConfigIssue[]): string[] {
     }
   });
   return out;
+}
+
+function inputDefinitions(value: unknown): InputDefinition[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const definitions: InputDefinition[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item) || typeof item.id !== "string" || typeof item.type !== "string") {
+      continue;
+    }
+    definitions.push({
+      id: item.id,
+      type: item.type,
+      description: typeof item.description === "string" ? item.description : undefined,
+      password: item.password === true,
+      default: typeof item.default === "string" ? item.default : undefined,
+      options: Array.isArray(item.options) ? item.options.flatMap(inputOption) : undefined,
+    });
+  }
+  return definitions;
+}
+
+function inputOption(option: unknown): InputOption[] {
+  if (typeof option === "string") {
+    return [{ label: option, value: option }];
+  }
+  if (isPlainObject(option) && typeof option.value === "string") {
+    return [{ label: typeof option.label === "string" ? option.label : option.value, value: option.value }];
+  }
+  return [];
 }
 
 function stringRecord(value: unknown, label: string, basePath: JsonPath, issues: ConfigIssue[]): Record<string, string> {
@@ -591,11 +767,14 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
     return result;
   }
 
+  const editor = editorFor(loc.source);
+  const inputs = editor === "vscode" ? inputDefinitions(parsed?.inputs) : undefined;
   let total = 0;
   for (const { entries, scope, basePath } of blocks) {
+    const hasFolder = loc.scoped === "workspace" || scope !== undefined;
     for (const [name, entry] of Object.entries(entries)) {
       total++;
-      const { transport, issues } = normalizeTransport(entry, loc.scoped);
+      const { transport, issues } = normalizeTransport(entry, loc.scoped, { editor, inputs, hasFolder });
       const serverPath: JsonPath = [...basePath, name];
       for (const issue of issues) {
         issue.path = issue.path ? [...serverPath, ...issue.path] : serverPath;
@@ -607,6 +786,7 @@ function scanPath(loc: ConfigLocation, p: string | undefined, ctx: ScanContext):
         configPath: p,
         rootKey: loc.rootKey,
         scope,
+        inputs,
         raw: entry,
         issues: applySecurityPolicy(issues, ctx),
       });
@@ -657,6 +837,7 @@ export interface DiscoverOptions {
   showAllClaudeProjects?: boolean;
   securityEnabled?: boolean;
   ruleSeverity?: Record<string, string>;
+  vscodeUserDir?: string;
 }
 
 interface ScanContext {
@@ -664,6 +845,7 @@ interface ScanContext {
   showAllClaudeProjects: boolean;
   securityEnabled: boolean;
   ruleSeverity: Record<string, string>;
+  vscodeUserDir?: string;
 }
 
 export function discoverAll(workspaceFolders: string[], options: DiscoverOptions = {}): ScannedFile[] {
@@ -672,16 +854,17 @@ export function discoverAll(workspaceFolders: string[], options: DiscoverOptions
     showAllClaudeProjects: options.showAllClaudeProjects ?? false,
     securityEnabled: options.securityEnabled ?? true,
     ruleSeverity: options.ruleSeverity ?? {},
+    vscodeUserDir: options.vscodeUserDir,
   };
   const files: ScannedFile[] = [];
   for (const loc of LOCATIONS) {
     if (loc.scoped === "global") {
-      const file = scanPath(loc, loc.resolve(), ctx);
+      const file = scanPath(loc, loc.resolve(ctx), ctx);
       assignProjectDir(file);
       files.push(file);
     } else {
       for (const ws of workspaceFolders) {
-        const file = scanPath(loc, loc.resolve(ws), ctx);
+        const file = scanPath(loc, loc.resolve(ctx, ws), ctx);
         file.workspaceFolder = ws;
         assignProjectDir(file, ws);
         files.push(file);

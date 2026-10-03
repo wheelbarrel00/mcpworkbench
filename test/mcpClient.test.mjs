@@ -86,6 +86,14 @@ async function buildFixture(name) {
 const toolsErrorServerPath = await buildFixture("tools-error-server");
 const barrierServerPath = await buildFixture("barrier-server");
 const progressServerPath = await buildFixture("progress-server");
+const pagedServerPath = await buildFixture("paged-server");
+const resourcesOnlyServerPath = await buildFixture("resources-only-server");
+
+function pagedTarget(name, env) {
+  const target = stdioTarget(name, pagedServerPath);
+  target.transport.env = env;
+  return target;
+}
 
 function stdioTarget(name, serverPath) {
   return {
@@ -111,19 +119,205 @@ function stdioServer(env) {
   };
 }
 
-test("only configured env reaches the server, with ${VAR} expanded", () => {
+test("the server inherits the host environment, with its configured env layered on top", () => {
   process.env.MCPWB_TOKEN = "tok";
-  const transport = createTransport(stdioServer({ API_KEY: "${MCPWB_TOKEN}", LITERAL: "plain" }));
-  assert.deepEqual(transport._serverParams.env, { API_KEY: "tok", LITERAL: "plain" });
+  process.env.MCPWB_SECRET = "from-host";
+  process.env.MCPWB_HOST_ONLY = "host";
+  try {
+    const transport = createTransport(stdioServer({ API_KEY: "${env:MCPWB_TOKEN}", LITERAL: "plain", MCPWB_SECRET: "from-config" }));
+    const passed = transport._serverParams.env;
+    assert.equal(passed.API_KEY, "tok");
+    assert.equal(passed.LITERAL, "plain");
+    assert.equal(passed.MCPWB_SECRET, "from-config");
+    assert.equal(passed.MCPWB_HOST_ONLY, "host");
+    assert.ok(Object.keys(passed).some((key) => key.toUpperCase() === "PATH"), "the host PATH is passed through");
+  } finally {
+    delete process.env.MCPWB_SECRET;
+    delete process.env.MCPWB_HOST_ONLY;
+  }
 });
 
-test("unrelated process.env secrets and PATH are not forwarded by us", () => {
+test("a Claude Desktop server gets only its configured env on top of the SDK's minimal set", () => {
   process.env.MCPWB_SECRET = "should-not-leak";
-  const transport = createTransport(stdioServer({}));
-  const passed = transport._serverParams.env;
-  assert.equal("MCPWB_SECRET" in passed, false);
-  assert.equal("PATH" in passed, false);
-  assert.deepEqual(passed, {});
+  try {
+    const transport = createTransport({ ...stdioServer({ A: "1" }), source: "claude-desktop" });
+    assert.deepEqual(transport._serverParams.env, { A: "1" });
+  } finally {
+    delete process.env.MCPWB_SECRET;
+  }
+});
+
+test("a Claude Code server is told its project folder through CLAUDE_PROJECT_DIR unless the config sets it", () => {
+  const project = mkTemp("mcpwb-proj-");
+  const claude = { ...stdioServer({}), source: "claude-code-workspace", projectDir: project };
+  assert.equal(createTransport(claude)._serverParams.env.CLAUDE_PROJECT_DIR, project);
+  assert.equal(createTransport(claude)._serverParams.env.CLAUDECODE, "1");
+
+  const overridden = { ...stdioServer({ CLAUDE_PROJECT_DIR: "/elsewhere" }), source: "claude-code-workspace", projectDir: project };
+  assert.equal(createTransport(overridden)._serverParams.env.CLAUDE_PROJECT_DIR, "/elsewhere");
+
+  const cursor = { ...stdioServer({}), projectDir: project };
+  assert.notEqual(createTransport(cursor)._serverParams.env.CLAUDE_PROJECT_DIR, project);
+});
+
+test("on Windows a configured variable replaces the host's under any casing and leaves one entry", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  process.env.MCPWB_MIXED = "host";
+  try {
+    const passed = createTransport(stdioServer({ path: "C:/only", MCPWB_mixed: "config" }))._serverParams.env;
+    const pathKeys = Object.keys(passed).filter((key) => key.toUpperCase() === "PATH");
+    assert.deepEqual(pathKeys, ["PATH"], "the SDK adds PATH in upper case, so the override must use that spelling");
+    assert.equal(passed.PATH, "C:/only");
+    const mixedKeys = Object.keys(passed).filter((key) => key.toUpperCase() === "MCPWB_MIXED");
+    assert.deepEqual(mixedKeys, ["MCPWB_mixed"]);
+    assert.equal(passed.MCPWB_mixed, "config");
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    delete process.env.MCPWB_MIXED;
+  }
+});
+
+test("the editor's own ELECTRON_RUN_AS_NODE is not passed on to the server", () => {
+  process.env.ELECTRON_RUN_AS_NODE = "1";
+  try {
+    const passed = createTransport(stdioServer({}))._serverParams.env;
+    assert.equal(Object.keys(passed).some((key) => key.toUpperCase() === "ELECTRON_RUN_AS_NODE"), false);
+  } finally {
+    delete process.env.ELECTRON_RUN_AS_NODE;
+  }
+});
+
+test("on Windows a Claude Desktop config's own Path is the one the server gets", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try {
+    const passed = createTransport({ ...stdioServer({ Path: "C:/desk" }), source: "claude-desktop" })._serverParams.env;
+    assert.deepEqual(passed, { PATH: "C:/desk" });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+  }
+});
+
+test("a command that still contains a variable after filling in is never run", async () => {
+  delete process.env.MCPWB_UNSET_TOOLS;
+  const server = {
+    ...stdioServer({}),
+    source: "claude-code-workspace",
+    projectDir: mkTemp("mcpwb-proj-"),
+    transport: { kind: "stdio", command: "${MCPWB_UNSET_TOOLS}/helper", args: [], env: {} },
+  };
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /won't run "\$\{MCPWB_UNSET_TOOLS\}\/helper" because it still contains "\$\{" after variables are filled in/);
+});
+
+test("Claude Code expands only identifier names, and a default runs to the first closing brace", () => {
+  process.env.MCPWB_CC_SET = "set-value";
+  delete process.env.MCPWB_CC_UNSET;
+  try {
+    const server = {
+      ...stdioServer({}),
+      source: "claude-code-workspace",
+      transport: {
+        kind: "stdio",
+        command: "node",
+        args: ["${MCPWB_CC(x86)}", '${MCPWB_CC_UNSET:-{"a":1}}', "${MCPWB_CC_UNSET:-${MCPWB_CC_SET}}", "${my-var}", "${MCPWB_CC_SET}"],
+        env: {},
+      },
+    };
+    assert.deepEqual(createTransport(server)._serverParams.args, ["${MCPWB_CC(x86)}", '{"a":1}', "${MCPWB_CC_SET}", "${my-var}", "set-value"]);
+  } finally {
+    delete process.env.MCPWB_CC_SET;
+  }
+});
+
+test("Claude Code reads its documented credentials as empty in a remote server's url and headers, but not for a local program", () => {
+  process.env.NPM_TOKEN = "npm_real";
+  process.env.ANTHROPIC_API_KEY = "sk-ant-real";
+  try {
+    const remote = createTransport({
+      name: "remote",
+      source: "claude-code-workspace",
+      configPath: path.join(os.tmpdir(), ".mcp.json"),
+      rootKey: "mcpServers",
+      raw: {},
+      issues: [],
+      transport: { kind: "http", url: "https://mcp.example.com/mcp?k=${ANTHROPIC_API_KEY:-none}", headers: { Authorization: "Bearer ${NPM_TOKEN}" } },
+    });
+    assert.equal(remote._url.searchParams.get("k"), "");
+    assert.equal(remote._requestInit.headers.Authorization, "Bearer ");
+
+    const local = createTransport({ ...stdioServer({ T: "${NPM_TOKEN}" }), source: "claude-code-workspace" });
+    assert.equal(local._serverParams.env.T, "npm_real");
+  } finally {
+    delete process.env.NPM_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+  }
+});
+
+test("a spawned server actually sees a variable it inherited from the host", { timeout: 10000 }, async () => {
+  const script = path.join(mkTemp("mcpwb-envprobe-"), "env-probe.cjs");
+  fs.writeFileSync(script, "process.stderr.write('inherited=' + process.env.MCPWB_INHERITED_ONLY + '\\n');\nsetTimeout(() => process.exit(1), 50);\n");
+  process.env.MCPWB_INHERITED_ONLY = "yes";
+  try {
+    const result = await testServer(stdioTarget("env-probe", script), 3000);
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /inherited=yes/);
+  } finally {
+    delete process.env.MCPWB_INHERITED_ONLY;
+  }
+});
+
+test("an unset variable reaches the server as written for Claude Code and as an empty value for VS Code", () => {
+  delete process.env.MCPWB_UNSET_ANYWHERE;
+  const claude = createTransport({ ...stdioServer({ A: "${MCPWB_UNSET_ANYWHERE}", B: "${MCPWB_UNSET_ANYWHERE:-fallback}" }), source: "claude-code-workspace" });
+  assert.equal(claude._serverParams.env.A, "${MCPWB_UNSET_ANYWHERE}");
+  assert.equal(claude._serverParams.env.B, "fallback");
+
+  const vscode = createTransport({ ...stdioServer({ A: "${env:MCPWB_UNSET_ANYWHERE}", B: "${MCPWB_UNSET_ANYWHERE}" }), source: "vscode-workspace" });
+  assert.equal(vscode._serverParams.env.A, "");
+  assert.equal(vscode._serverParams.env.B, "${MCPWB_UNSET_ANYWHERE}");
+});
+
+test("each editor expands only its own syntax", () => {
+  process.env.MCPWB_SYNTAX = "value";
+  try {
+    const values = ["${MCPWB_SYNTAX}", "${env:MCPWB_SYNTAX}"];
+    const expand = (source) => createTransport({ ...stdioServer({}), transport: { kind: "stdio", command: "node", args: values, env: {} }, source })._serverParams.args;
+    assert.deepEqual(expand("claude-code-workspace"), ["value", "${env:MCPWB_SYNTAX}"]);
+    assert.deepEqual(expand("vscode-workspace"), ["${MCPWB_SYNTAX}", "value"]);
+    assert.deepEqual(expand("cursor-workspace"), ["${MCPWB_SYNTAX}", "value"]);
+    assert.deepEqual(expand("claude-desktop"), values);
+  } finally {
+    delete process.env.MCPWB_SYNTAX;
+  }
+});
+
+test("a VS Code input is filled from the values given at launch and fails clearly without one", async () => {
+  const server = { ...stdioServer({ KEY: "${input:api-key}" }), source: "vscode-workspace" };
+  assert.equal(createTransport(server, new Map([["api-key", "s3cret"]]))._serverParams.env.KEY, "s3cret");
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /\$\{input:api-key\} has no value/);
+});
+
+test("a variable only VS Code can resolve stops the launch with a clear error", async () => {
+  const server = { ...stdioServer({}), transport: { kind: "stdio", command: "node", args: ["${command:pick}"], env: {} }, source: "vscode-workspace" };
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Only VS Code can fill in \$\{command:pick\}, so MCP Workbench won't launch this server/);
+});
+
+test("Cursor fills in the workspace folder name and the path separator", () => {
+  const project = path.join(mkTemp("mcpwb-proj-"), "my-proj");
+  fs.mkdirSync(project);
+  const server = {
+    ...stdioServer({}),
+    transport: { kind: "stdio", command: "node", args: ["${workspaceFolderBasename}", "a${pathSeparator}b${/}c"], env: {} },
+    projectDir: project,
+  };
+  assert.deepEqual(createTransport(server)._serverParams.args, ["my-proj", `a${path.sep}b${path.sep}c`]);
 });
 
 test("editor variables expand across command, args, and env for the tester", () => {
@@ -146,7 +340,7 @@ test("editor variables expand across command, args, and env for the tester", () 
   const transport = createTransport(server);
   assert.equal(transport._serverParams.command, proj + "/bin/node");
   assert.deepEqual(transport._serverParams.args, [proj + "/server.js", os.homedir() + "/cfg"]);
-  assert.deepEqual(transport._serverParams.env, { WS: proj });
+  assert.equal(transport._serverParams.env.WS, proj);
 });
 
 test("dollar sequences in the workspace path are substituted literally, not as replacement patterns", () => {
@@ -164,28 +358,41 @@ test("dollar sequences in the workspace path are substituted literally, not as r
   const transport = createTransport(server);
   assert.equal(transport._serverParams.command, proj + "/node");
   assert.deepEqual(transport._serverParams.args, [proj + "/server.js"]);
-  assert.deepEqual(transport._serverParams.env, { WS: proj });
+  assert.equal(transport._serverParams.env.WS, proj);
 });
 
-test("${workspaceFolder} does not throw as an env var when no project dir is set", () => {
+test("${workspaceFolder} in a config with no project folder stops the launch instead of becoming empty", async () => {
   const server = {
     name: "demo",
     transport: { kind: "stdio", command: "node", args: ["${workspaceFolder}/x.js"], env: {} },
-    source: "cursor-workspace",
+    source: "cursor-global",
     configPath: path.join(os.tmpdir(), "mcp.json"),
     rootKey: "mcpServers",
     raw: {},
     issues: [],
   };
-  const transport = createTransport(server);
-  assert.deepEqual(transport._serverParams.args, ["/x.js"]);
+  const result = await testServer(server, 400);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /isn't tied to a project folder, so MCP Workbench can't fill in \$\{workspaceFolder\}/);
+});
+
+test("VS Code's older workspaceRoot names are filled in like their current ones", () => {
+  const project = path.join(mkTemp("mcpwb-proj-"), "legacy");
+  fs.mkdirSync(project);
+  const server = {
+    ...stdioServer({}),
+    source: "vscode-workspace",
+    projectDir: project,
+    transport: { kind: "stdio", command: "node", args: ["${workspaceRoot}", "${workspaceRootFolderName}"], env: {} },
+  };
+  assert.deepEqual(createTransport(server)._serverParams.args, [project, "legacy"]);
 });
 
 test("an env var name with parentheses expands in the command", () => {
   process.env["MCPWB_PF(x86)"] = "C:/PF86";
   const server = {
     name: "demo",
-    transport: { kind: "stdio", command: "${MCPWB_PF(x86)}/app", args: [], env: {} },
+    transport: { kind: "stdio", command: "${env:MCPWB_PF(x86)}/app", args: [], env: {} },
     source: "cursor-workspace",
     configPath: path.join(os.tmpdir(), "mcp.json"),
     rootKey: "mcpServers",
@@ -200,7 +407,7 @@ test("editor variables expand inside a remote server url", () => {
   process.env.MCPWB_HOST = "example.com";
   const server = {
     name: "demo",
-    transport: { kind: "http", url: "https://${MCPWB_HOST}/mcp", headers: {} },
+    transport: { kind: "http", url: "https://${env:MCPWB_HOST}/mcp", headers: {} },
     source: "cursor-workspace",
     configPath: path.join(os.tmpdir(), "mcp.json"),
     rootKey: "mcpServers",
@@ -396,9 +603,11 @@ test("onClosed fires exactly once when the server dies mid-session", { timeout: 
   const closed = new Promise((resolve) => {
     signalClosed = resolve;
   });
-  const opened = await openSession(pidStubbornServer(pidFile), 12000, () => {
-    closedCount++;
-    signalClosed();
+  const opened = await openSession(pidStubbornServer(pidFile), 12000, {
+    onClosed: () => {
+      closedCount++;
+      signalClosed();
+    },
   });
   assert.equal(opened.ok, true);
 
@@ -427,8 +636,10 @@ test("a deliberate dispose does not fire onClosed", { timeout: 15000 }, async ()
     issues: [],
   };
   let closedCount = 0;
-  const opened = await openSession(server, 12000, () => {
-    closedCount++;
+  const opened = await openSession(server, 12000, {
+    onClosed: () => {
+      closedCount++;
+    },
   });
   assert.equal(opened.ok, true);
   await opened.session.dispose();
@@ -495,11 +706,111 @@ test("post-connect list calls run concurrently rather than sequentially", { time
   await opened.session.dispose();
 });
 
-test("a failing tools/list yields an empty tool list instead of failing the whole session", { timeout: 8000 }, async () => {
+test("a failing tools/list keeps the session open and reports the error instead of an empty list", { timeout: 8000 }, async () => {
   const opened = await openSession(stdioTarget("tools-error", toolsErrorServerPath), 2000);
   assert.equal(opened.ok, true);
   assert.deepEqual(opened.session.info.tools, []);
+  assert.match(opened.session.info.listProblems.tools.error, /tools listing exploded/);
   await opened.session.dispose();
+});
+
+test("lists follow nextCursor across pages, in the tester and in Test Connection", { timeout: 15000 }, async () => {
+  const opened = await openSession(stdioTarget("paged", pagedServerPath), 8000);
+  assert.equal(opened.ok, true);
+  try {
+    const info = opened.session.info;
+    assert.equal(info.tools.length, 25);
+    assert.equal(info.tools[24].name, "tool-24");
+    assert.equal(info.resources.length, 25);
+    assert.equal(info.resourceTemplates.length, 25);
+    assert.equal(info.prompts.length, 25);
+    assert.deepEqual(info.listProblems, {});
+  } finally {
+    await opened.session.dispose();
+  }
+  const probed = await probe(stdioTarget("paged", pagedServerPath), 8000);
+  assert.equal(probed.ok, true);
+  assert.equal(probed.toolCount, 25);
+});
+
+test("tools on every page keep their output-schema validation", { timeout: 15000 }, async () => {
+  const opened = await openSession(pagedTarget("schema", { MCPWB_OUTPUT_SCHEMA: "1" }), 8000);
+  assert.equal(opened.ok, true);
+  try {
+    for (const name of ["tool-0", "tool-24"]) {
+      const result = await opened.session.callTool(name, {});
+      assert.equal(result.ok, false, `${name} should fail its output schema`);
+      assert.match(result.error, /output schema/);
+    }
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("a server that repeats a page cursor stops listing with an error instead of repeating pages", { timeout: 15000 }, async () => {
+  const opened = await openSession(pagedTarget("repeat", { MCPWB_REPEAT: "1" }), 8000);
+  assert.equal(opened.ok, true);
+  try {
+    const { tools, listProblems } = opened.session.info;
+    assert.equal(tools.length, 2);
+    assert.match(listProblems.tools.error, /same page cursor twice/);
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("listing shares one time limit across all its pages", { timeout: 15000 }, async () => {
+  const started = Date.now();
+  const opened = await openSession(pagedTarget("slow", { MCPWB_ENDLESS: "1", MCPWB_SLOW_MS: "150" }), 2000);
+  assert.equal(opened.ok, true);
+  try {
+    assert.ok(Date.now() - started < 8000, "listing must not take 50 pages times the timeout");
+    const { tools, listProblems } = opened.session.info;
+    assert.ok(tools.length < 50);
+    assert.ok(listProblems.tools.error);
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("a server that advertises resources but implements no resources list shows no error", { timeout: 8000 }, async () => {
+  const target = stdioTarget("no-resources-list", resourcesOnlyServerPath);
+  target.transport.env = { MCPWB_NO_RESOURCES_LIST: "1" };
+  const opened = await openSession(target, 4000);
+  assert.equal(opened.ok, true);
+  try {
+    assert.deepEqual(opened.session.info.resources, []);
+    assert.deepEqual(opened.session.info.listProblems, {});
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("a server with resources but no templates handler shows no templates error", { timeout: 8000 }, async () => {
+  const opened = await openSession(stdioTarget("resources-only", resourcesOnlyServerPath), 4000);
+  assert.equal(opened.ok, true);
+  try {
+    assert.equal(opened.session.info.resources.length, 1);
+    assert.deepEqual(opened.session.info.resourceTemplates, []);
+    assert.deepEqual(opened.session.info.listProblems, {});
+  } finally {
+    await opened.session.dispose();
+  }
+});
+
+test("a server that never stops paging is cut off and the listing says so", { timeout: 20000 }, async () => {
+  const target = stdioTarget("endless", pagedServerPath);
+  target.transport.env = { MCPWB_ENDLESS: "1" };
+  const opened = await openSession(target, 8000);
+  assert.equal(opened.ok, true);
+  try {
+    const { tools, listProblems } = opened.session.info;
+    assert.equal(tools.length, 50);
+    assert.equal(listProblems.tools.truncated, true);
+    assert.equal(listProblems.tools.error, undefined);
+  } finally {
+    await opened.session.dispose();
+  }
 });
 
 test("a long tool call that reports progress is not killed by the base timeout", { timeout: 10000 }, async () => {
@@ -645,20 +956,258 @@ test("a server's own missing-child ENOENT does not trigger the launcher PATH hin
   assert.doesNotMatch(result.detail, /could not be found on this editor's PATH/);
 });
 
-test("a referenced env var that is not set fails with a clear error", async () => {
+test("an unset header variable reaches a Claude Code remote server as written", () => {
   delete process.env.MCPWB_MISSING_HEADER;
   const server = {
     name: "needs-token",
     transport: { kind: "http", url: "http://127.0.0.1:1/never", headers: { Authorization: "Bearer ${MCPWB_MISSING_HEADER}" } },
-    source: "cursor-workspace",
-    configPath: path.join(os.tmpdir(), "mcp.json"),
+    source: "claude-code-workspace",
+    configPath: path.join(os.tmpdir(), ".mcp.json"),
     rootKey: "mcpServers",
     raw: {},
     issues: [],
   };
-  const result = await testServer(server, 400);
+  const transport = createTransport(server);
+  assert.equal(transport._requestInit.headers.Authorization, "Bearer ${MCPWB_MISSING_HEADER}");
+});
+
+function remoteServer(port, overrides = {}) {
+  return {
+    name: "remote",
+    transport: { kind: "http", url: `http://127.0.0.1:${port}/mcp`, headers: {} },
+    source: "vscode-workspace",
+    configPath: path.join(os.tmpdir(), "mcp.json"),
+    rootKey: "servers",
+    raw: {},
+    issues: [],
+    ...overrides,
+  };
+}
+
+function sseOnlyServer(postStatus) {
+  const requests = [];
+  let stream;
+  const server = http.createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (req.url === "/mcp" && req.method === "POST") {
+      res.writeHead(postStatus).end();
+      return;
+    }
+    if (req.url === "/mcp" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+      res.write("event: endpoint\ndata: /messages\n\n");
+      stream = res;
+      return;
+    }
+    if (req.url === "/messages" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        res.writeHead(202).end();
+        const message = JSON.parse(body);
+        const reply = (result) => stream.write(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`);
+        if (message.method === "initialize") {
+          reply({ protocolVersion: message.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "sse-only", version: "0.0.1" } });
+        } else if (message.method === "tools/list") {
+          reply({ tools: [{ name: "ping", inputSchema: { type: "object" } }] });
+        }
+      });
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  return { server, requests };
+}
+
+async function listening(server) {
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return server.address().port;
+}
+
+test("an http server that refuses Streamable HTTP is reached over SSE, the way editors fall back", { timeout: 10000 }, async () => {
+  const { server, requests } = sseOnlyServer(405);
+  const port = await listening(server);
+  try {
+    const result = await probe(remoteServer(port), 5000);
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.connectedOver, "sse");
+    assert.equal(result.toolCount, 1);
+    assert.deepEqual(requests.slice(0, 2), ["POST /mcp", "GET /mcp"]);
+
+    const opened = await openSession(remoteServer(port), 5000);
+    assert.equal(opened.ok, true);
+    assert.equal(opened.session.info.connectedOver, "sse");
+    await opened.session.dispose();
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test("an explicit sse server is not tried over Streamable HTTP first", { timeout: 10000 }, async () => {
+  const { server, requests } = sseOnlyServer(405);
+  const port = await listening(server);
+  try {
+    const target = remoteServer(port);
+    target.transport = { ...target.transport, kind: "sse" };
+    const result = await probe(target, 5000);
+    assert.equal(result.ok, true, result.error);
+    assert.equal(result.connectedOver, "sse");
+    assert.equal(requests.includes("POST /mcp"), false);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test("an unauthorized Streamable HTTP server does not fall back to SSE", { timeout: 10000 }, async () => {
+  const { server, requests } = sseOnlyServer(401);
+  const port = await listening(server);
+  try {
+    const result = await probe(remoteServer(port), 5000);
+    assert.equal(result.ok, false);
+    assert.equal(requests.includes("GET /mcp"), false);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test("when SSE fails too, the Streamable HTTP error leads and the SSE error is in the detail", { timeout: 10000 }, async () => {
+  const server = http.createServer((_req, res) => res.writeHead(404).end());
+  const port = await listening(server);
+  try {
+    const result = await testServer(remoteServer(port), 5000);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /Streamable HTTP error/);
+    assert.match(result.detail, /retried over SSE/);
+  } finally {
+    server.close();
+  }
+});
+
+function cmdLaunchedServer(name, scriptBody) {
+  const dir = mkTemp(`mcpwb-${name}-`);
+  const pidFile = path.join(dir, "pid");
+  const script = path.join(dir, `${name}.cjs`);
+  fs.writeFileSync(script, `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n${scriptBody}\nsetInterval(() => {}, 1 << 30);\n`);
+  const launcher = path.join(dir, `launch-${name}.cmd`);
+  fs.writeFileSync(launcher, `@"${process.execPath}" "${script}"\r\n`);
+  const target = stdioTarget(name, script);
+  target.transport = { kind: "stdio", command: launcher, args: [], env: {} };
+  return { target, pidFile };
+}
+
+async function launchedPid(pidFile) {
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(pidFile) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return Number(fs.readFileSync(pidFile, "utf8").trim());
+}
+
+test("on Windows a connect that times out kills the server behind a .cmd launcher", { timeout: 20000, skip: process.platform !== "win32" }, async () => {
+  const { target, pidFile } = cmdLaunchedServer("silent", "process.stdin.resume();");
+  const result = await probe(target, 4000);
   assert.equal(result.ok, false);
-  assert.match(result.error, /MCPWB_MISSING_HEADER/);
+  const pid = await launchedPid(pidFile);
+  assert.ok(Number.isInteger(pid) && pid > 0);
+  assert.equal(await waitUntilDead(pid, 8000), true, "the node process behind the .cmd launcher must not outlive a failed connect");
+});
+
+test("on Windows a timed-out npx-style launcher explains that the first run may still be downloading", { timeout: 20000, skip: process.platform !== "win32" }, async () => {
+  const dir = mkTemp("mcpwb-npxhint-");
+  const script = path.join(dir, "silent.cjs");
+  fs.writeFileSync(script, "process.stdin.resume();\nsetInterval(() => {}, 1 << 30);\n");
+  const launcher = path.join(dir, "npx.cmd");
+  fs.writeFileSync(launcher, `@"${process.execPath}" "${script}"\r\n`);
+  const target = stdioTarget("npx-hint", script);
+  target.transport = { kind: "stdio", command: launcher, args: [], env: {} };
+  const result = await probe(target, 1500);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Timed out/);
+  assert.match(result.detail, /download the package on the first run/);
+});
+
+test("on Windows a server behind a .cmd launcher that rejects initialize is killed too", { timeout: 20000, skip: process.platform !== "win32" }, async () => {
+  const rejectInitialize = `
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "refusing to start" } }) + "\\n");
+    }
+  }
+});`;
+  const { target, pidFile } = cmdLaunchedServer("rejecting", rejectInitialize);
+  const result = await probe(target, 8000);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /refusing to start/);
+  const pid = await launchedPid(pidFile);
+  assert.equal(await waitUntilDead(pid, 8000), true, "a server that answers initialize with an error must not be orphaned");
+});
+
+test("on Windows a server behind a .cmd launcher with an unsupported protocol version is killed too", { timeout: 20000, skip: process.platform !== "win32" }, async () => {
+  const wrongVersion = `
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.method === "initialize") {
+      const result = { protocolVersion: "1999-01-01", capabilities: {}, serverInfo: { name: "old", version: "0.0.1" } };
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
+    }
+  }
+});`;
+  const { target, pidFile } = cmdLaunchedServer("old-protocol", wrongVersion);
+  const result = await probe(target, 8000);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /protocol version is not supported/);
+  const pid = await launchedPid(pidFile);
+  assert.equal(await waitUntilDead(pid, 8000), true, "a server with an unsupported protocol version must not be orphaned");
+});
+
+test("a Streamable HTTP server that fails after initialize succeeded is not retried over SSE", { timeout: 10000 }, async () => {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push(req.method);
+    if (req.method !== "POST") {
+      res.writeHead(405).end();
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const message = JSON.parse(body);
+      if (message.method === "initialize") {
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "S1" });
+        res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: { protocolVersion: message.params.protocolVersion, capabilities: {}, serverInfo: { name: "late-404", version: "0.0.1" } },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+  });
+  const port = await listening(server);
+  try {
+    const result = await probe(remoteServer(port), 5000);
+    assert.equal(result.ok, false);
+    assert.equal(requests.includes("GET"), false, "no SSE retry once initialize has worked");
+    assert.doesNotMatch(result.detail ?? "", /retried over SSE/);
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
 });
 
 test("a malformed remote URL fails with the plain error and no detail", async () => {
@@ -737,12 +1286,12 @@ test("on Windows the command is resolved with the server's substituted env PATH"
   try {
     const transport = createTransport({
       name: "via-env-path",
-      source: "claude-code-workspace",
-      configPath: path.join(bin, ".mcp.json"),
+      source: "vscode-workspace",
+      configPath: path.join(bin, "mcp.json"),
       transport: { kind: "stdio", command: "mcpwbtool", args: [], env: { Path: "${env:MCPWB_BIN}" } },
     });
     assert.equal(transport._serverParams.command, path.join(bin, "mcpwbtool.cmd"));
-    assert.equal(transport._serverParams.env.Path, bin);
+    assert.equal(transport._serverParams.env.PATH, bin);
   } finally {
     Object.defineProperty(process, "platform", platform);
     process.env.PATH = savedPath;
@@ -757,8 +1306,8 @@ test("a substituted value is never expanded a second time", () => {
   try {
     const transport = createTransport({
       name: "second-pass",
-      source: "claude-code-workspace",
-      configPath: path.join(project, ".mcp.json"),
+      source: "cursor-workspace",
+      configPath: path.join(project, ".cursor", "mcp.json"),
       projectDir: project,
       transport: { kind: "stdio", command: "node", args: ["${workspaceFolder}"], env: {} },
     });

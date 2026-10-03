@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { build } from "esbuild";
 
 const require = createRequire(import.meta.url);
@@ -46,6 +47,22 @@ function onWindows(searchPath, fn) {
   return withPlatform("win32", () => withPath(searchPath, fn));
 }
 
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(vars)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 const bundlePath = path.join(mkTemp("mcpwb-trust-"), "launchTrust.cjs");
 await build({
   entryPoints: [path.resolve("src/launchTrust.ts")],
@@ -67,6 +84,7 @@ const {
   hostVariables,
   launchedExecutable,
   launchesWorkspaceFile,
+  enteredValuesWarning,
 } = require(bundlePath);
 
 const STORE_KEY = "mcpWorkbench.trustedLaunches";
@@ -107,7 +125,7 @@ function httpServer(transport = {}) {
     rootKey: "servers",
     raw: {},
     issues: [],
-    transport: { kind: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${GITHUB_TOKEN}" }, ...transport },
+    transport: { kind: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${env:GITHUB_TOKEN}" }, ...transport },
   };
 }
 
@@ -174,24 +192,26 @@ test("malformed persisted trust entries are ignored", () => {
 });
 
 test("the stdio preview lists host variables first, then the program, one argument per line, and every env entry", () => {
-  const preview = launchPreview(
-    stdioServer({
-      args: ["server.js", "--root", "${workspaceFolder}"],
-      env: { NODE_OPTIONS: "--require ./x.js", TOKEN: "${API_TOKEN}" },
-    }),
+  const preview = withEnv({ PROJECT_ROOT: "/p", API_TOKEN: "t" }, () =>
+    launchPreview(
+      stdioServer({
+        args: ["server.js", "--root", "${PROJECT_ROOT}"],
+        env: { NODE_OPTIONS: "--require ./x.js", TOKEN: "${API_TOKEN}" },
+      }),
+    ),
   );
   assert.match(preview, /starts a program on your machine/);
-  assert.match(preview, /^Filled in from your machine: API_TOKEN$/m);
+  assert.match(preview, /^Filled in from your machine: PROJECT_ROOT, API_TOKEN$/m);
   assert.match(preview, /Program: "node"/);
   assert.ok(preview.indexOf("Filled in") < preview.indexOf("Program:"), preview);
-  assert.ok(preview.includes('Arguments:\n  "server.js"\n  "--root"\n  "${workspaceFolder}"'), preview);
+  assert.ok(preview.includes('Arguments:\n  "server.js"\n  "--root"\n  "${PROJECT_ROOT}"'), preview);
   assert.ok(preview.includes('NODE_OPTIONS = "--require ./x.js"'), preview);
 });
 
 test("the remote preview shows the headers and names the secrets that will be sent", () => {
-  const preview = launchPreview(httpServer());
+  const preview = withEnv({ GITHUB_TOKEN: "ghp_x" }, () => launchPreview(httpServer()));
   assert.match(preview, /connects to a remote server/);
-  assert.ok(preview.includes('Authorization: "Bearer ${GITHUB_TOKEN}"'), preview);
+  assert.ok(preview.includes('Authorization: "Bearer ${env:GITHUB_TOKEN}"'), preview);
   assert.match(preview, /^Filled in from your machine: GITHUB_TOKEN$/m);
   assert.doesNotMatch(preview, /starts a program/);
 });
@@ -286,7 +306,7 @@ test("a program found on PATH is not treated as a workspace file even when it li
 
 test("a PATH built from ${workspaceFolder} is resolved after substitution, so a program added there changes the fingerprint", () => {
   const workspace = mkTemp("mcpwb-ws-");
-  const server = toolServer(workspace, { PATH: "${workspaceFolder}/bin" });
+  const server = { ...toolServer(workspace, { PATH: "${workspaceFolder}/bin" }), source: "cursor-workspace" };
   onWindows(mkTemp("mcpwb-bin-"), () => {
     const before = launchFingerprint(server);
     const added = writeTool(path.join(workspace, "bin"));
@@ -304,6 +324,62 @@ test("a relative PATH entry in the config is treated as coming from the workspac
   });
 });
 
+test("a value entered at launch that makes the program come from the workspace folder is called out", () => {
+  const workspace = mkTemp("mcpwb-ws-");
+  writeTool(workspace);
+  const server = {
+    ...stdioServer({ command: "${input:tool}", args: [], env: {} }),
+    source: "vscode-workspace",
+    projectDir: workspace,
+    inputs: [{ id: "tool", type: "promptString", description: "Tool" }],
+  };
+  onWindows(mkTemp("mcpwb-bin-"), () => {
+    assert.equal(launchesWorkspaceFile(server), false);
+    assert.equal(launchedExecutable(server, new Map([["tool", "mcpwbtool"]])).fromWorkingDir, true);
+    assert.match(enteredValuesWarning(server, new Map([["tool", "mcpwbtool"]])), /runs ".*mcpwbtool\.cmd", which was found through this workspace folder/);
+    assert.equal(enteredValuesWarning(server, new Map([["tool", "mcpwb-not-there"]])), undefined);
+    assert.equal(enteredValuesWarning(server, new Map()), undefined);
+    assert.match(launchPreview(server), /^Resolves to: not known until you enter the values it asks for$/m);
+  });
+});
+
+test("a command that keeps a variable nothing will fill says it won't launch", () => {
+  const desktop = { ...stdioServer({ command: "${HOME}/bin/server", args: [], env: {} }), source: "claude-desktop" };
+  assert.match(launchPreview(desktop), /^Resolves to: nothing\. The command still contains "\$\{" after variables are filled in, so it won't launch\.$/m);
+});
+
+test("an approval saved by 0.4.8, before the fingerprint had a version, is asked for again", () => {
+  const server = stdioServer({ command: "mcpwb-not-a-program" });
+  const t = server.transport;
+  assert.equal(launchedExecutable(server), undefined, "nothing resolves, so 0.4.8 hashed a null path");
+  const legacy = createHash("sha256")
+    .update(JSON.stringify([t.kind, t.command, null, t.args, Object.entries(t.env).sort()]))
+    .digest("hex");
+  const store = new LaunchTrustStore(fakeMemento({ id: legacy }));
+  assert.equal(store.isTrusted("id", server), false);
+});
+
+test("changing an input's default or options asks again, but rewording its description does not", () => {
+  const region = { id: "region", type: "pickString", description: "Region", options: [{ label: "eu", value: "eu" }] };
+  const server = (input) => ({ ...httpServer({ url: "https://${input:region}.example.com/mcp", headers: {} }), inputs: [input] });
+  const base = launchFingerprint(server(region));
+  assert.equal(launchFingerprint(server({ ...region, description: "Pick a region" })), base);
+  assert.notEqual(launchFingerprint(server({ ...region, options: [{ label: "eu", value: "evil.example/x?" }] })), base);
+  assert.notEqual(launchFingerprint(server({ ...region, default: "eu" })), base);
+  assert.notEqual(launchFingerprint(server({ ...region, type: "promptString" })), base);
+});
+
+test("variables that aren't set are listed apart from the ones filled in, with what the server receives", () => {
+  withEnv({ MCPWB_SET: "1", MCPWB_UNSET: undefined, MCPWB_DEFAULTED: undefined }, () => {
+    const preview = launchPreview(stdioServer({ args: ["${MCPWB_SET}", "${MCPWB_UNSET}", "${MCPWB_DEFAULTED:-x}"] }));
+    assert.match(preview, /^Filled in from your machine: MCPWB_SET$/m);
+    assert.match(preview, /^Not set in your environment: MCPWB_UNSET\. It reaches the server as written\.$/m);
+
+    const vscode = { ...stdioServer({ args: ["${env:MCPWB_UNSET}"] }), source: "vscode-workspace" };
+    assert.match(launchPreview(vscode), /^Not set in your environment: MCPWB_UNSET\. It reaches the server as an empty value\.$/m);
+  });
+});
+
 test("on Windows an unresolvable bare command says so in the preview", () => {
   const server = { ...stdioServer({ command: "mcpwb-missing", args: [], env: {} }), projectDir: mkTemp("mcpwb-ws-") };
   onWindows(mkTemp("mcpwb-bin-"), () => {
@@ -318,9 +394,30 @@ test("stdio servers are launched and remote servers are connected to", () => {
   assert.equal(launchQuestion(httpServer()), "Connect to remote from this workspace?");
 });
 
-test("hostVariables lists each referenced variable once across every field and skips editor variables for local programs", () => {
-  const names = hostVariables(
-    stdioServer({ command: "${TOOLS}/node", args: ["${KEY}", "${env:KEY}", "${userHome}/x"], env: { A: "${OTHER}" } }),
-  );
-  assert.deepEqual(names, ["TOOLS", "KEY", "OTHER"]);
+test("hostVariables lists each variable the editor reads from the environment once, skipping editor variables for local programs", () => {
+  const cursor = {
+    ...stdioServer({ command: "${env:TOOLS}/node", args: ["${env:KEY}", "${KEY}", "${userHome}/x"], env: { A: "${env:OTHER}" } }),
+    source: "cursor-workspace",
+  };
+  withEnv({ TOOLS: "/t", KEY: "k", OTHER: "o" }, () => {
+    assert.deepEqual(hostVariables(cursor), ["TOOLS", "KEY", "OTHER"]);
+  });
+});
+
+test("for Claude Code every set ${NAME} is filled in from the machine, and ${env:NAME} is not read at all", () => {
+  const server = stdioServer({ command: "${TOOLS}/node", args: ["${KEY}", "${env:KEY}", "${userHome}/x", "${UNSET_WITH_DEFAULT:-fallback}"], env: { A: "${OTHER}" } });
+  withEnv({ TOOLS: "/t", KEY: "k", OTHER: "o", userHome: undefined, UNSET_WITH_DEFAULT: undefined }, () => {
+    assert.deepEqual(hostVariables(server), ["TOOLS", "KEY", "OTHER"]);
+  });
+});
+
+test("a Claude Desktop server reads nothing from the environment and doesn't inherit it", () => {
+  const desktop = { ...stdioServer({ env: { A: "${OTHER}" } }), source: "claude-desktop" };
+  assert.deepEqual(hostVariables(desktop), []);
+  assert.doesNotMatch(launchPreview(desktop), /inherits your environment/);
+});
+
+test("the stdio preview says the program inherits your environment variables", () => {
+  assert.match(launchPreview(stdioServer()), /^This starts a program on your machine with your permissions\. It also inherits your environment variables, including any keys or tokens set there\.$/m);
+  assert.doesNotMatch(launchPreview(httpServer()), /inherits/);
 });

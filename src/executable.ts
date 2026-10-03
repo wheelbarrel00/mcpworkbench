@@ -99,7 +99,9 @@ function findWithExtensions(base: string, extensions: string[]): string | undefi
 }
 
 function envValue(env: Record<string, string>, name: string): string | undefined {
-  const key = Object.keys(env).find((candidate) => candidate.toUpperCase() === name);
+  const key = Object.keys(env)
+    .filter((candidate) => candidate.toUpperCase() === name)
+    .pop();
   return key === undefined ? undefined : env[key];
 }
 

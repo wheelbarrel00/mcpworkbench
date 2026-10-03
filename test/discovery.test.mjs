@@ -37,7 +37,7 @@ await build({
   logLevel: "silent",
 });
 
-const { discoverAll, claudeDesktopConfigPath, vscodeUserConfigPath, referencedEnvironmentVariables } = require(bundlePath);
+const { discoverAll, claudeDesktopConfigPath, vscodeUserConfigPath, vscodeUserDirFromHost } = require(bundlePath);
 
 function withPlatform(platform, fn) {
   const original = Object.getOwnPropertyDescriptor(process, "platform");
@@ -85,6 +85,28 @@ function scanClaudeCodeWorkspace(contents) {
   fs.writeFileSync(file, contents);
   const scanned = discoverAll([ws]);
   return scanned.find((f) => f.source === "claude-code-workspace" && f.path === file);
+}
+
+function scanVscodeWorkspace(contents) {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".vscode", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, contents);
+  return discoverAll([ws]).find((f) => f.source === "vscode-workspace" && f.path === file);
+}
+
+function scanClaudeDesktop(contents) {
+  const configHome = mkTemp("mcpwb-xdg-");
+  const file = path.join(configHome, "Claude", "claude_desktop_config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, contents);
+  let found;
+  withPlatform("linux", () => {
+    withEnv("XDG_CONFIG_HOME", configHome, () => {
+      found = discoverAll([]).find((f) => f.source === "claude-desktop");
+    });
+  });
+  return found;
 }
 
 function scanClaudeCodeUser(contents) {
@@ -256,7 +278,7 @@ test("a repeated unset env var reference is only flagged once", () => {
   delete process.env.MCPWB_DEFINITELY_UNSET;
   const file = scanCursorWorkspace(
     JSON.stringify({
-      mcpServers: { x: { url: "http://localhost", headers: { a: "${MCPWB_DEFINITELY_UNSET} ${MCPWB_DEFINITELY_UNSET}" } } },
+      mcpServers: { x: { url: "http://localhost", headers: { a: "${env:MCPWB_DEFINITELY_UNSET} ${env:MCPWB_DEFINITELY_UNSET}" } } },
     })
   );
   const unset = file.servers[0].issues.filter((i) => i.code === "env-unset");
@@ -275,12 +297,12 @@ test("editor variables like ${workspaceFolder} are not mistaken for unset env va
   assert.equal(hasIssue(file.servers[0].issues, "env-unset"), false);
 });
 
-test("only exact-case, unprefixed editor variables are exempt from the unset-env check", () => {
+test("only exact-case editor variables are filled in, and ${env:} always reads the environment", () => {
   delete process.env.workspacefolder;
   const lower = scanCursorWorkspace(
     JSON.stringify({ mcpServers: { x: { command: "node", env: { DIR: "${workspacefolder}" } } } })
   );
-  assert.equal(hasIssue(lower.servers[0].issues, "env-unset"), true, "a lowercase ${workspacefolder} is a real env ref, not an editor variable");
+  assert.equal(hasIssue(lower.servers[0].issues, "variable-not-expanded"), true, "Cursor doesn't know a lowercase ${workspacefolder}");
 
   const prefixed = scanCursorWorkspace(
     JSON.stringify({ mcpServers: { x: { command: "node", env: { DIR: "${env:workspaceFolder}" } } } })
@@ -291,7 +313,7 @@ test("only exact-case, unprefixed editor variables are exempt from the unset-env
 test("an env var name containing parentheses is recognized", () => {
   delete process.env["MCPWB_PARENS(x86)"];
   const file = scanCursorWorkspace(
-    JSON.stringify({ mcpServers: { x: { command: "node", env: { P: "${MCPWB_PARENS(x86)}" } } } })
+    JSON.stringify({ mcpServers: { x: { command: "node", env: { P: "${env:MCPWB_PARENS(x86)}" } } } })
   );
   const issue = file.servers[0].issues.find((i) => i.code === "env-unset");
   assert.ok(issue, "a parenthesized env var reference should be parsed and, when unset, flagged");
@@ -518,7 +540,7 @@ test("an unknown-transport entry anchors its issue at the server name", () => {
 
 test("env-unset carries a path to the offending env key", () => {
   delete process.env.MCPWB_UNSET_PATH;
-  const server = scanServers({ a: { command: "node", env: { CONFIG: "${MCPWB_UNSET_PATH}" } } }).servers[0];
+  const server = scanServers({ a: { command: "node", env: { CONFIG: "${env:MCPWB_UNSET_PATH}" } } }).servers[0];
   const issue = issueOf(server, "env-unset");
   assert.ok(issue);
   assert.deepEqual(issue.path, ["mcpServers", "a", "env", "CONFIG"]);
@@ -542,7 +564,7 @@ test("security checks are dropped when securityEnabled is false", () => {
 test("structural checks survive securityEnabled false", () => {
   delete process.env.MCPWB_STRUCT_UNSET;
   const file = scanServersWith(
-    { a: { command: "npx", args: ["pkg"], env: { X: "${MCPWB_STRUCT_UNSET}" } } },
+    { a: { command: "npx", args: ["pkg"], env: { X: "${env:MCPWB_STRUCT_UNSET}" } } },
     { securityEnabled: false },
   );
   assert.equal(hasIssue(file.servers[0].issues, "npx-missing-y"), true);
@@ -571,7 +593,7 @@ test("a security rule severity can be escalated via ruleSeverity", () => {
 test("ruleSeverity does not affect non-security checks", () => {
   delete process.env.MCPWB_RS_UNSET;
   const file = scanServersWith(
-    { a: { command: "node", env: { KEY: "${MCPWB_RS_UNSET}" } } },
+    { a: { command: "node", env: { KEY: "${env:MCPWB_RS_UNSET}" } } },
     { ruleSeverity: { "env-unset": "off" } },
   );
   assert.equal(hasIssue(file.servers[0].issues, "env-unset"), true);
@@ -842,11 +864,272 @@ test("a config path that can't be read is reported as read-failed, not as a JSON
   assert.equal(hasIssue(scanned.fileIssues, "bad-json"), false);
 });
 
-test("referencedEnvironmentVariables skips bare editor variables but keeps env:-prefixed names", () => {
-  assert.deepEqual(
-    referencedEnvironmentVariables("${A}/${workspaceFolder}/${env:B}/${userHome}/${env:userHome}"),
-    ["A", "B", "userHome"],
+test("an unset variable is flagged in the command, an argument and the url, not only in env and headers", () => {
+  delete process.env.MCPWB_L1_UNSET;
+  const stdio = scanServers({ a: { command: "${env:MCPWB_L1_UNSET}/node", args: ["--x", "${env:MCPWB_L1_ARG}"] } }).servers[0];
+  const unset = stdio.issues.filter((i) => i.code === "env-unset");
+  assert.deepEqual(unset.map((i) => i.path), [
+    ["mcpServers", "a", "command"],
+    ["mcpServers", "a", "args", 1],
+  ]);
+
+  const remote = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { r: { type: "http", url: "https://${MCPWB_L1_HOST}/mcp" } } })).servers[0];
+  assert.deepEqual(issueOf(remote, "env-unset").path, ["mcpServers", "r", "url"]);
+});
+
+test("Cursor and VS Code leave a bare ${VAR} as written and the lint suggests ${env:VAR}", () => {
+  process.env.MCPWB_BARE_SET = "1";
+  try {
+    const cursor = scanServers({ a: { command: "node", env: { TOKEN: "${MCPWB_BARE_SET}" } } }).servers[0];
+    const issue = issueOf(cursor, "variable-not-expanded");
+    assert.ok(issue, "a bare reference is not expanded by Cursor even when the variable is set");
+    assert.match(issue.message, /Cursor doesn't expand \$\{MCPWB_BARE_SET\}/);
+    assert.match(issue.message, /\$\{env:MCPWB_BARE_SET\}/);
+    assert.equal(hasIssue(cursor.issues, "env-unset"), false);
+
+    const vscode = scanVscodeWorkspace(JSON.stringify({ servers: { a: { command: "node", args: ["${MCPWB_BARE_SET}"] } } })).servers[0];
+    assert.match(issueOf(vscode, "variable-not-expanded").message, /^VS Code doesn't expand/);
+  } finally {
+    delete process.env.MCPWB_BARE_SET;
+  }
+});
+
+test("Claude Code expands ${VAR} and ${VAR:-default} but leaves ${env:VAR} as written", () => {
+  delete process.env.MCPWB_CC_UNSET;
+  const file = scanClaudeCodeWorkspace(
+    JSON.stringify({ mcpServers: { a: { command: "node", args: ["${MCPWB_CC_UNSET:-fallback}", "${env:MCPWB_CC_UNSET}"], env: { K: "${MCPWB_CC_UNSET}" } } } }),
   );
+  const server = file.servers[0];
+  const unset = server.issues.filter((i) => i.code === "env-unset");
+  assert.equal(unset.length, 1, "a reference with a default is not unset");
+  assert.deepEqual(unset[0].path, ["mcpServers", "a", "env", "K"]);
+  assert.match(unset[0].message, /passes \$\{MCPWB_CC_UNSET\} to the server as written/);
+  const literal = issueOf(server, "variable-not-expanded");
+  assert.deepEqual(literal.path, ["mcpServers", "a", "args", 1]);
+  assert.match(literal.message, /Use \$\{MCPWB_CC_UNSET\} instead/);
+});
+
+test("Claude Code reads ${workspaceFolder} as an environment variable and the lint explains it", () => {
+  delete process.env.workspaceFolder;
+  const server = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { a: { command: "node", args: ["${workspaceFolder}/server.js"] } } })).servers[0];
+  const issue = issueOf(server, "env-unset");
+  assert.ok(issue);
+  assert.match(issue.message, /doesn't fill in editor variables/);
+  assert.match(issue.message, /CLAUDE_PROJECT_DIR:-\./);
+});
+
+test("Claude Desktop expands no variables at all", () => {
+  process.env.MCPWB_DESKTOP_SET = "1";
+  try {
+    const file = scanClaudeDesktop(JSON.stringify({ mcpServers: { a: { command: "node", env: { A: "${MCPWB_DESKTOP_SET}", B: "${env:MCPWB_DESKTOP_SET}" } } } }));
+    const issues = file.servers[0].issues.filter((i) => i.code === "variable-not-expanded");
+    assert.equal(issues.length, 2);
+    assert.match(issues[0].message, /^Claude Desktop doesn't expand variables/);
+  } finally {
+    delete process.env.MCPWB_DESKTOP_SET;
+  }
+});
+
+test("VS Code inputs are parsed onto the server and an undefined input is flagged", () => {
+  const file = scanVscodeWorkspace(
+    JSON.stringify({
+      inputs: [
+        { type: "promptString", id: "api-key", description: "API key", password: true },
+        { type: "pickString", id: "region", description: "Region", options: ["eu", { label: "US East", value: "us-east-1" }] },
+        { type: "command", id: "picked", command: "extension.pick" },
+        { id: "no-type" },
+      ],
+      servers: {
+        a: {
+          type: "http",
+          url: "https://mcp.example.com/${input:region}",
+          headers: { Authorization: "Bearer ${input:api-key}", "X-Missing": "${input:missing}", "X-Cmd": "${input:picked}" },
+        },
+      },
+    }),
+  );
+  const server = file.servers[0];
+  assert.deepEqual(server.inputs.map((i) => i.id), ["api-key", "region", "picked"]);
+  assert.equal(server.inputs[0].password, true);
+  assert.deepEqual(server.inputs[1].options, [
+    { label: "eu", value: "eu" },
+    { label: "US East", value: "us-east-1" },
+  ]);
+  const undefinedInput = issueOf(server, "input-undefined");
+  assert.equal(undefinedInput.level, "warning");
+  assert.deepEqual(undefinedInput.path, ["servers", "a", "headers", "X-Missing"]);
+  const unsupported = issueOf(server, "variable-unsupported");
+  assert.equal(unsupported.level, "info");
+  assert.deepEqual(unsupported.path, ["servers", "a", "headers", "X-Cmd"]);
+  assert.equal(server.issues.filter((i) => i.code.startsWith("input") || i.code.startsWith("variable")).length, 2);
+});
+
+test("VS Code variables only VS Code can resolve are flagged as untestable", () => {
+  const server = scanVscodeWorkspace(JSON.stringify({ servers: { a: { command: "node", args: ["${command:pick}", "${config:editor.fontSize}", "${file}"] } } })).servers[0];
+  assert.equal(server.issues.filter((i) => i.code === "variable-unsupported").length, 3);
+});
+
+test("inputs are only read from VS Code files", () => {
+  const ws = mkTemp("mcpwb-ws-");
+  const file = path.join(ws, ".cursor", "mcp.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ inputs: [{ type: "promptString", id: "k" }], mcpServers: { a: { command: "node", args: ["${input:k}"] } } }));
+  const server = discoverAll([ws]).find((f) => f.path === file).servers[0];
+  assert.equal(server.inputs, undefined);
+  assert.equal(hasIssue(server.issues, "variable-not-expanded"), true);
+});
+
+test("a Claude Code url entry without a type is flagged because Claude Code skips it", () => {
+  const untyped = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { r: { url: "https://mcp.example.com/mcp" } } })).servers[0];
+  const issue = issueOf(untyped, "missing-type");
+  assert.equal(issue.level, "error");
+  assert.deepEqual(issue.path, ["mcpServers", "r", "url"]);
+
+  const typed = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { r: { type: "http", url: "https://mcp.example.com/mcp" } } })).servers[0];
+  assert.equal(hasIssue(typed.issues, "missing-type"), false);
+
+  const cursor = scanServers({ r: { url: "https://mcp.example.com/mcp" } }).servers[0];
+  assert.equal(hasIssue(cursor.issues, "missing-type"), false);
+});
+
+test("the secret advice names each editor's own reference syntax", () => {
+  const key = "sk-" + "a".repeat(40);
+  const cursor = scanServers({ a: { command: "node", env: { KEY: key } } }).servers[0];
+  assert.match(issueOf(cursor, "hardcoded-secret").message, /\$\{env:VAR\}/);
+
+  const claudeCode = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { a: { command: "node", env: { KEY: key } } } })).servers[0];
+  assert.match(issueOf(claudeCode, "hardcoded-secret").message, /as \$\{VAR\} so/);
+
+  const desktop = scanClaudeDesktop(JSON.stringify({ mcpServers: { a: { command: "node", env: { KEY: key } } } })).servers[0];
+  const message = issueOf(desktop, "hardcoded-secret").message;
+  assert.match(message, /plain text/);
+  assert.doesNotMatch(message, /\$\{/);
+});
+
+test("the VS Code user folder comes from the host's global storage for VS Code builds only", () => {
+  const userDir = path.join("/data", "Code - Insiders", "User");
+  const storage = path.join(userDir, "globalStorage", "wheelbarrel00.mcp-workbench-wb00");
+  const userData = { scheme: "vscode-userdata", fsPath: storage };
+  assert.equal(vscodeUserDirFromHost(userData, "vscode-insiders"), userDir);
+  assert.equal(vscodeUserDirFromHost(userData, "vscode"), userDir);
+  assert.equal(vscodeUserDirFromHost(userData, "vscodium"), userDir);
+  assert.equal(vscodeUserDirFromHost({ scheme: "file", fsPath: storage }, "vscode"), userDir);
+  assert.equal(vscodeUserDirFromHost(userData, "cursor"), undefined);
+  assert.equal(vscodeUserDirFromHost({ scheme: "vscode-remote", fsPath: storage }, "vscode"), undefined);
+  assert.equal(vscodeUserConfigPath(path.join("/u", "User")), path.join("/u", "User", "mcp.json"));
+});
+
+test("a lowercase drive letter from the host is upper-cased so server ids match the APPDATA spelling", () => {
+  const storage = ["c:", "Users", "u", "AppData", "Roaming", "Code", "User", "globalStorage", "ext"].join(path.sep);
+  assert.equal(
+    vscodeUserDirFromHost({ scheme: "vscode-userdata", fsPath: storage }, "vscode"),
+    ["C:", "Users", "u", "AppData", "Roaming", "Code", "User"].join(path.sep),
+  );
+});
+
+test("Claude Code credentials in a remote entry are flagged because Claude Code reads them as empty", () => {
+  const remote = scanClaudeCodeWorkspace(
+    JSON.stringify({ mcpServers: { r: { type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer ${NPM_TOKEN}" } } } }),
+  ).servers[0];
+  const issue = issueOf(remote, "credential-blanked");
+  assert.deepEqual(issue.path, ["mcpServers", "r", "headers", "Authorization"]);
+  assert.match(issue.message, /reads NPM_TOKEN as empty/);
+
+  const local = scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { l: { command: "node", env: { T: "${NPM_TOKEN}" } } } })).servers[0];
+  assert.equal(hasIssue(local.issues, "credential-blanked"), false);
+});
+
+test("Claude Code leaves names it can't expand as written, and a brace in a default is fine", () => {
+  process.env.MCPWB_CC_DEFAULT = "set";
+  try {
+    const server = scanClaudeCodeWorkspace(
+      JSON.stringify({ mcpServers: { a: { command: "node", args: ["${MCPWB_CC(x86)}", '${MCPWB_CC_DEFAULT:-{"a":1}}', "${my-var}"] } } }),
+    ).servers[0];
+    const literal = server.issues.filter((i) => i.code === "variable-not-expanded").map((i) => i.path.at(-1));
+    assert.deepEqual(literal, [0, 2]);
+    assert.equal(hasIssue(server.issues, "env-unset"), false);
+  } finally {
+    delete process.env.MCPWB_CC_DEFAULT;
+  }
+});
+
+test("Claude Code configs with pathological values are scanned in linear time", () => {
+  for (const value of ["${A:-".repeat(100000), "${A}".repeat(100000), "${A:-${B}".repeat(50000) + "}"]) {
+    const started = Date.now();
+    scanClaudeCodeWorkspace(JSON.stringify({ mcpServers: { a: { command: "node", args: [value] } } }));
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 2000, `scan took ${elapsed}ms for a ${value.length}-character value`);
+  }
+});
+
+test("a shell's own ${VAR} in an argument to a shell is not flagged as unexpanded", () => {
+  const vscode = scanVscodeWorkspace(JSON.stringify({ servers: { a: { command: "bash", args: ["-c", "for f in a b; do echo ${f}; done"] } } })).servers[0];
+  assert.equal(hasIssue(vscode.issues, "variable-not-expanded"), false);
+
+  const nodeArg = scanVscodeWorkspace(JSON.stringify({ servers: { a: { command: "node", args: ["${TOKEN}"] } } })).servers[0];
+  assert.equal(hasIssue(nodeArg.issues, "variable-not-expanded"), true);
+
+  const shellEnv = scanVscodeWorkspace(JSON.stringify({ servers: { a: { command: "bash", env: { T: "${TOKEN}" } } } })).servers[0];
+  assert.equal(hasIssue(shellEnv.issues, "variable-not-expanded"), true, "env values aren't read by the shell");
+});
+
+test("Cursor gets the right advice for variables only VS Code knows", () => {
+  const server = scanServers({ a: { command: "node", args: ["${workspaceRoot}", "${file}"] } }).servers[0];
+  const messages = server.issues.filter((i) => i.code === "variable-not-expanded").map((i) => i.message);
+  assert.match(messages[0], /Use \$\{workspaceFolder\} instead/);
+  assert.doesNotMatch(messages[1], /env:file/);
+});
+
+test("a mis-cased editor variable suggests the right spelling, not an environment variable", () => {
+  const server = scanServers({ a: { command: "node", args: ["${workspacefolder}/x.js"] } }).servers[0];
+  assert.match(issueOf(server, "variable-not-expanded").message, /Use \$\{workspaceFolder\} instead/);
+});
+
+test("${workspaceFolder} in a global config with no project folder is flagged as untestable", () => {
+  const cursorDir = path.join(process.env.USERPROFILE, ".cursor");
+  fs.mkdirSync(cursorDir, { recursive: true });
+  const file = path.join(cursorDir, "mcp.json");
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { g: { command: "node", args: ["${workspaceFolder}/x.js", "${userHome}"] } } }));
+  try {
+    const server = discoverAll([]).find((f) => f.source === "cursor-global").servers[0];
+    const issues = server.issues.filter((i) => i.code === "variable-unsupported");
+    assert.equal(issues.length, 1);
+    assert.match(issues[0].message, /isn't tied to one/);
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+  const workspaceScoped = scanServers({ a: { command: "node", args: ["${workspaceFolder}/x.js"] } }).servers[0];
+  assert.equal(hasIssue(workspaceScoped.issues, "variable-unsupported"), false);
+});
+
+test("on Windows two spellings of the same unset variable are reported once", () => {
+  delete process.env.MCPWB_CASED;
+  withPlatform("win32", () => {
+    const server = scanServers({ a: { command: "node", env: { A: "${env:MCPWB_Cased}", B: "${env:MCPWB_CASED}" } } }).servers[0];
+    assert.equal(server.issues.filter((i) => i.code === "env-unset").length, 1);
+  });
+});
+
+test("a repeated input id is read from its last definition, as VS Code does", () => {
+  const server = scanVscodeWorkspace(
+    JSON.stringify({
+      inputs: [
+        { type: "promptString", id: "k", description: "first" },
+        { type: "command", id: "k", command: "x.pick" },
+      ],
+      servers: { a: { command: "node", args: ["${input:k}"] } },
+    }),
+  ).servers[0];
+  assert.equal(hasIssue(server.issues, "variable-unsupported"), true);
+});
+
+test("a VS Code user mcp.json is read from the host's user folder when one is given", () => {
+  const userDir = mkTemp("mcpwb-user-");
+  const file = path.join(userDir, "mcp.json");
+  fs.writeFileSync(file, JSON.stringify({ servers: { profiled: { command: "node" } } }));
+  const found = discoverAll([], { vscodeUserDir: userDir }).find((f) => f.source === "vscode-user");
+  assert.equal(found.path, file);
+  assert.deepEqual(found.servers.map((s) => s.name), ["profiled"]);
 });
 
 test("NODE_OPTIONS preloads are caught through quoting and underscore spellings", () => {

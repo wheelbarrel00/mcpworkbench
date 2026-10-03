@@ -1,11 +1,21 @@
 import { createHash } from "crypto";
 import type { Memento } from "vscode";
+import { editorFor, inheritsEnvironment } from "./editors";
 import { ResolvedExecutable } from "./executable";
-import { planStdioLaunch } from "./launchPlan";
-import { referencedEditorVariables, referencedEnvironmentVariables } from "./substitution";
-import { DiscoveredServer } from "./types";
+import { StdioLaunchPlan, planStdioLaunch } from "./launchPlan";
+import {
+  filledEnvironmentNames,
+  inputDefinition,
+  inputIds,
+  localPathNames,
+  unsetEnvironmentNames,
+  unsetNotice,
+  variableScope,
+} from "./substitution";
+import { DiscoveredServer, InputValues } from "./types";
 
 const STORE_KEY = "mcpWorkbench.trustedLaunches";
+const FINGERPRINT_VERSION = 2;
 const VALUE_LIMIT = 200;
 const NAME_LIMIT = 80;
 const ENTRY_LIMIT = 40;
@@ -54,16 +64,35 @@ export function launchFingerprint(server: DiscoveredServer): string {
     t.kind === "stdio"
       ? [t.kind, t.command, launchedExecutable(server)?.path ?? null, t.args, sortedEntries(t.env)]
       : [t.kind, t.url, sortedEntries(t.headers)];
-  return createHash("sha256").update(JSON.stringify(launch)).digest("hex");
+  return createHash("sha256").update(JSON.stringify([FINGERPRINT_VERSION, ...launch, referencedInputs(server)])).digest("hex");
 }
 
-export function launchedExecutable(server: DiscoveredServer): ResolvedExecutable | undefined {
-  const t = server.transport;
-  return t.kind === "stdio" ? planStdioLaunch(t, server.projectDir, "keep").executable : undefined;
+export function launchedExecutable(server: DiscoveredServer, inputs?: InputValues): ResolvedExecutable | undefined {
+  return stdioPlan(server, inputs)?.executable;
 }
 
 export function launchesWorkspaceFile(server: DiscoveredServer): boolean {
   return launchedExecutable(server)?.fromWorkingDir === true;
+}
+
+export function enteredValuesWarning(server: DiscoveredServer, inputs: InputValues): string | undefined {
+  const entered = inputs.size ? launchedExecutable(server, inputs) : undefined;
+  if (!entered?.fromWorkingDir || entered.path === launchedExecutable(server)?.path) {
+    return undefined;
+  }
+  return `With the values you entered, this runs ${new PreviewWriter().value(entered.path)}, which was found through this workspace folder, not on your PATH.`;
+}
+
+function referencedInputs(server: DiscoveredServer): unknown[] {
+  return inputIds(server).map((id) => {
+    const input = inputDefinition(server.inputs, id);
+    return input ? [id, input.type, input.default ?? null, input.password === true, input.options ?? null] : [id, null];
+  });
+}
+
+function stdioPlan(server: DiscoveredServer, inputs?: InputValues): StdioLaunchPlan | undefined {
+  const t = server.transport;
+  return t.kind === "stdio" ? planStdioLaunch(t, variableScope(server, inputs), "keep") : undefined;
 }
 
 export function launchAction(server: DiscoveredServer): "Launch" | "Connect" {
@@ -71,7 +100,11 @@ export function launchAction(server: DiscoveredServer): "Launch" | "Connect" {
 }
 
 export function displayName(server: DiscoveredServer): string {
-  return clip(escapeHidden(server.name), NAME_LIMIT).text;
+  return displayText(server.name, NAME_LIMIT);
+}
+
+export function displayText(raw: string, limit = VALUE_LIMIT): string {
+  return clip(escapeHidden(raw), limit).text;
 }
 
 export function launchQuestion(server: DiscoveredServer): string {
@@ -83,10 +116,15 @@ export function launchQuestion(server: DiscoveredServer): string {
 export function launchPreview(server: DiscoveredServer): string {
   const t = server.transport;
   const preview = new PreviewWriter();
-  preview.section(t.kind === "stdio" ? "This starts a program on your machine with your permissions." : "This connects to a remote server.");
+  preview.section(launchSummary(server));
   const fromHost = hostVariables(server);
   if (fromHost.length) {
     preview.section(`Filled in from your machine: ${preview.list(fromHost.map((name) => preview.key(name)), ", ")}`);
+  }
+  const unset = unsetEnvironmentNames(server);
+  if (unset.length) {
+    const names = preview.list(unset.map((name) => preview.key(name)), ", ");
+    preview.section(unsetNotice(names, unset.length, editorFor(server.source)));
   }
   if (t.kind === "stdio") {
     const program = [`Program: ${preview.value(t.command)}`];
@@ -118,22 +156,34 @@ export function launchPreview(server: DiscoveredServer): string {
 }
 
 export function hostVariables(server: DiscoveredServer): string[] {
-  const t = server.transport;
-  if (t.kind === "stdio") {
-    return unique([t.command, ...t.args, ...Object.values(t.env)].flatMap(referencedEnvironmentVariables));
+  const filled = filledEnvironmentNames(server);
+  return server.transport.kind === "stdio" ? filled : [...new Set([...filled, ...localPathNames(server)])];
+}
+
+function launchSummary(server: DiscoveredServer): string {
+  if (server.transport.kind !== "stdio") {
+    return "This connects to a remote server.";
   }
-  const values = [t.url, ...Object.values(t.headers)];
-  return unique([...values.flatMap(referencedEnvironmentVariables), ...values.flatMap(referencedEditorVariables)]);
+  const program = "This starts a program on your machine with your permissions.";
+  return inheritsEnvironment(editorFor(server.source))
+    ? `${program} It also inherits your environment variables, including any keys or tokens set there.`
+    : program;
 }
 
 function resolutionLine(server: DiscoveredServer, preview: PreviewWriter): string | undefined {
-  const executable = launchedExecutable(server);
-  if (executable) {
-    const origin = executable.fromWorkingDir ? " (found through this workspace folder, not on your PATH)" : "";
-    return `Resolves to: ${preview.value(executable.path)}${origin}`;
+  const plan = stdioPlan(server);
+  if (plan?.executable) {
+    const origin = plan.executable.fromWorkingDir ? " (found through this workspace folder, not on your PATH)" : "";
+    return `Resolves to: ${preview.value(plan.executable.path)}${origin}`;
   }
-  const t = server.transport;
-  if (process.platform === "win32" && t.kind === "stdio" && !/[\\/:]/.test(t.command) && !t.command.includes("${")) {
+  const command = plan?.command.trim() ?? "";
+  if (command.includes("${input:") && editorFor(server.source) === "vscode") {
+    return "Resolves to: not known until you enter the values it asks for";
+  }
+  if (command.includes("${")) {
+    return 'Resolves to: nothing. The command still contains "${" after variables are filled in, so it won\'t launch.';
+  }
+  if (process.platform === "win32" && command && !/[\\/:]/.test(command)) {
     return "Resolves to: nothing on your PATH";
   }
   return undefined;
@@ -186,10 +236,6 @@ function escapeHidden(value: string): string {
 
 function clip(value: string, limit: number): { text: string; omitted: number } {
   return value.length <= limit ? { text: value, omitted: 0 } : { text: value.slice(0, limit), omitted: value.length - limit };
-}
-
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
 }
 
 function sortedEntries(record: Record<string, string>): [string, string][] {

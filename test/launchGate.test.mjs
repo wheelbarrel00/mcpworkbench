@@ -42,7 +42,8 @@ async function bundle(entry) {
   return require(outfile);
 }
 
-const { confirmLaunch, resetLaunchTrust, forgetLegacyLaunchTrust, ALWAYS_ALLOW, MANAGE_TRUST } = await bundle("src/launchGate.ts");
+const { approveLaunch, confirmEnteredValues, confirmLaunch, resetLaunchTrust, forgetLegacyLaunchTrust, ALWAYS_ALLOW, MANAGE_TRUST } =
+  await bundle("src/launchGate.ts");
 const { LaunchTrustStore } = await bundle("src/launchTrust.ts");
 
 function fakeMemento(initial = {}) {
@@ -203,6 +204,66 @@ test("in Restricted Mode a remote workspace server is described as a connection"
   const state = dialogs();
   assert.equal(await confirmLaunch(new LaunchTrustStore(fakeMemento()), remoteWorkspaceServer()), false);
   assert.match(state.warnings[0].message, /Trust the workspace to connect to it/);
+});
+
+function inputServer(overrides = {}) {
+  return {
+    ...workspaceServer({ env: { KEY: "${input:key}" } }),
+    source: "vscode-workspace",
+    configPath: path.join(workspace, ".vscode", "mcp.json"),
+    rootKey: "servers",
+    inputs: [{ id: "key", type: "promptString", description: "Key", password: true }],
+    ...overrides,
+  };
+}
+
+test("inputs are asked for only after the launch prompt is accepted", async () => {
+  const declined = dialogs(undefined);
+  declined.answers = ["s3cret"];
+  assert.equal(await approveLaunch(new LaunchTrustStore(fakeMemento()), inputServer()), undefined);
+  assert.equal(declined.warnings.length, 1);
+  assert.equal((declined.prompts ?? []).length, 0, "nothing is asked before the preview is accepted");
+
+  const accepted = dialogs("Launch");
+  accepted.answers = ["s3cret"];
+  const inputs = await approveLaunch(new LaunchTrustStore(fakeMemento()), inputServer());
+  assert.deepEqual([...inputs], [["key", "s3cret"]]);
+  assert.equal(accepted.prompts.length, 1);
+});
+
+test("in Restricted Mode a workspace server's inputs are never asked for", async () => {
+  setTrusted(false);
+  const state = dialogs();
+  state.answers = ["s3cret"];
+  assert.equal(await approveLaunch(new LaunchTrustStore(fakeMemento()), inputServer()), undefined);
+  assert.equal((state.prompts ?? []).length, 0);
+});
+
+test("a value entered at launch that resolves to a program in the workspace folder needs its own confirmation", async () => {
+  const folder = mkTemp("mcpwb-ws-");
+  fs.writeFileSync(path.join(folder, "mcpwbtool.cmd"), "@echo off\n");
+  const server = inputServer({
+    projectDir: folder,
+    transport: { kind: "stdio", command: "${input:tool}", args: [], env: {} },
+    inputs: [{ id: "tool", type: "promptString", description: "Tool" }],
+  });
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const savedPath = process.env.PATH;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  process.env.PATH = mkTemp("mcpwb-bin-");
+  try {
+    const declined = dialogs(undefined);
+    assert.equal(await confirmEnteredValues(server, new Map([["tool", "mcpwbtool"]])), false);
+    assert.equal(declined.warnings[0].rest[0].modal, true);
+    assert.match(declined.warnings[0].rest[0].detail, /found through this workspace folder/);
+
+    const quiet = dialogs();
+    assert.equal(await confirmEnteredValues(server, new Map([["tool", "mcpwb-not-there"]])), true);
+    assert.equal(quiet.warnings.length, 0);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    process.env.PATH = savedPath;
+  }
 });
 
 test("resetting launch trust reports how many approvals were cleared", async () => {

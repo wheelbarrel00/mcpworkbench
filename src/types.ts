@@ -24,6 +24,22 @@ export interface ConfigIssue {
   offset?: number;
 }
 
+export type InputValues = ReadonlyMap<string, string>;
+
+export interface InputOption {
+  label: string;
+  value: string;
+}
+
+export interface InputDefinition {
+  id: string;
+  type: string;
+  description?: string;
+  password?: boolean;
+  default?: string;
+  options?: InputOption[];
+}
+
 export interface DiscoveredServer {
   name: string;
   transport: McpTransport;
@@ -32,6 +48,7 @@ export interface DiscoveredServer {
   rootKey: "servers" | "mcpServers";
   scope?: string;
   projectDir?: string;
+  inputs?: InputDefinition[];
   raw: unknown;
   issues: ConfigIssue[];
 }

@@ -1,12 +1,29 @@
 import * as vscode from "vscode";
 import { isWithinFolder } from "./executable";
 import { isWorkspaceScoped, serverId } from "./serversTree";
-import { LaunchTrustStore, displayName, launchAction, launchesWorkspaceFile, launchPreview, launchQuestion } from "./launchTrust";
-import { DiscoveredServer } from "./types";
+import { promptForInputs } from "./launchInputs";
+import {
+  LaunchTrustStore,
+  displayName,
+  enteredValuesWarning,
+  launchAction,
+  launchesWorkspaceFile,
+  launchPreview,
+  launchQuestion,
+} from "./launchTrust";
+import { DiscoveredServer, InputValues } from "./types";
 
 export const ALWAYS_ALLOW = "Always allow this configuration";
 export const MANAGE_TRUST = "Manage Workspace Trust";
 const LEGACY_TRUST_LAUNCH_KEY = "trustWorkspaceLaunch";
+
+export async function approveLaunch(launchTrust: LaunchTrustStore, server: DiscoveredServer): Promise<InputValues | undefined> {
+  if (!(await confirmLaunch(launchTrust, server))) {
+    return undefined;
+  }
+  const inputs = await promptForInputs(server);
+  return inputs && (await confirmEnteredValues(server, inputs)) ? inputs : undefined;
+}
 
 export async function confirmLaunch(launchTrust: LaunchTrustStore, server: DiscoveredServer): Promise<boolean> {
   const definedByWorkspace = isWorkspaceScoped(server.source);
@@ -41,6 +58,16 @@ export async function confirmLaunch(launchTrust: LaunchTrustStore, server: Disco
     await launchTrust.trust(id, server);
     return true;
   }
+  return choice === action;
+}
+
+export async function confirmEnteredValues(server: DiscoveredServer, inputs: InputValues): Promise<boolean> {
+  const warning = enteredValuesWarning(server, inputs);
+  if (!warning) {
+    return true;
+  }
+  const action = launchAction(server);
+  const choice = await vscode.window.showWarningMessage(`MCP Workbench: ${launchQuestion(server)}`, { modal: true, detail: warning }, action);
   return choice === action;
 }
 

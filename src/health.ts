@@ -10,6 +10,7 @@ export interface HealthRecord {
   status: HealthStatus;
   latencyMs?: number;
   toolCount?: number;
+  toolsTruncated?: boolean;
   error?: string;
   checkedAt: number;
 }
@@ -66,7 +67,8 @@ export class HealthStore {
 
 export function recordFromProbe(result: ProbeResult, checkedAt: number): HealthRecord {
   if (result.ok) {
-    return { status: "ok", latencyMs: result.latencyMs, toolCount: result.toolCount, checkedAt };
+    const truncated = result.toolsTruncated ? { toolsTruncated: true } : {};
+    return { status: "ok", latencyMs: result.latencyMs, toolCount: result.toolCount, ...truncated, checkedAt };
   }
   return { status: "error", latencyMs: result.latencyMs, error: result.error, checkedAt };
 }
@@ -135,7 +137,8 @@ export function healthSuffix(record: HealthRecord | undefined): string {
     parts.push(`${record.latencyMs}ms`);
   }
   if (typeof record.toolCount === "number") {
-    parts.push(`${record.toolCount} ${plural(record.toolCount, "tool")}`);
+    const count = record.toolsTruncated ? `${record.toolCount}+` : `${record.toolCount}`;
+    parts.push(`${count} ${plural(record.toolCount, "tool")}`);
   }
   return parts.length ? `✓ ${parts.join(" · ")}` : "✓";
 }
@@ -161,6 +164,9 @@ function sanitize(value: unknown): HealthRecord | undefined {
   }
   if (typeof v.toolCount === "number") {
     record.toolCount = v.toolCount;
+  }
+  if (v.toolsTruncated === true) {
+    record.toolsTruncated = true;
   }
   if (typeof v.error === "string") {
     record.error = v.error;

@@ -26,6 +26,17 @@ export const window = {
     state.warnings.push({ message, rest });
     return state.choices.shift();
   },
+  async showInputBox(options) {
+    const state = recorder();
+    (state.prompts ??= []).push({ kind: "input", options });
+    return (state.answers ??= []).shift();
+  },
+  async showQuickPick(items, options) {
+    const state = recorder();
+    (state.prompts ??= []).push({ kind: "pick", items, options });
+    const answer = (state.answers ??= []).shift();
+    return items.find((item) => item.value === answer);
+  },
 };
 
 export const commands = {

@@ -81,6 +81,12 @@ test("statusBarTooltip pluralizes each count independently", () => {
   );
 });
 
+test("a cut-off tool count is shown with a plus, and survives a reload", () => {
+  const record = recordFromProbe({ ok: true, latencyMs: 12, toolCount: 2000, toolsTruncated: true }, 1);
+  assert.equal(healthSuffix(record), "✓ 12ms · 2000+ tools");
+  assert.equal(healthSuffix(recordFromProbe({ ok: true, latencyMs: 12, toolCount: 3 }, 1)), "✓ 12ms · 3 tools");
+});
+
 test("healthSuffix renders ok latency+tools, error, and nothing for unknown/undefined", () => {
   assert.equal(healthSuffix(undefined), "");
   assert.equal(healthSuffix({ status: "unknown", checkedAt: 0 }), "");

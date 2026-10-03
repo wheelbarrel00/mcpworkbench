@@ -1,15 +1,15 @@
 import * as vscode from "vscode";
 import * as os from "os";
 import * as path from "path";
-import { claudeDesktopConfigPath, vscodeUserConfigPath } from "./discovery";
+import { claudeDesktopConfigPath, vscodeUserConfigPath, vscodeUserDirFromHost } from "./discovery";
 import { ServersProvider, serverId } from "./serversTree";
 import { showTester, disposeTester } from "./testPanel";
 import { McpDiagnostics } from "./diagnostics";
-import { probe } from "./mcpClient";
+import { ProbeResult, fellBackToSse, probe } from "./mcpClient";
 import { HealthStore, recordFromProbe, rollup, statusBarSeverity, statusBarText, statusBarTooltip } from "./health";
 import { LaunchTrustStore } from "./launchTrust";
-import { confirmLaunch, forgetLegacyLaunchTrust, resetLaunchTrust } from "./launchGate";
-import { ScannedFile } from "./types";
+import { approveLaunch, forgetLegacyLaunchTrust, resetLaunchTrust } from "./launchGate";
+import { DiscoveredServer, ScannedFile } from "./types";
 
 const WATCH_GLOB = "**/{.cursor/mcp.json,.vscode/mcp.json,.mcp.json}";
 
@@ -23,17 +23,21 @@ const BACKGROUND_BY_SEVERITY: Record<"error" | "warning", string> = {
 const HOME = os.homedir();
 const toWatchTarget = (file: string | undefined) =>
   file ? [{ dir: path.dirname(file), file: path.basename(file) }] : [];
-const GLOBAL_WATCH_TARGETS: Array<{ dir: string; file: string }> = [
-  { dir: HOME, file: ".claude.json" },
-  { dir: path.join(HOME, ".cursor"), file: "mcp.json" },
-  ...toWatchTarget(claudeDesktopConfigPath()),
-  ...toWatchTarget(vscodeUserConfigPath()),
-];
+
+function globalWatchTargets(vscodeUserDir: string | undefined): Array<{ dir: string; file: string }> {
+  return [
+    { dir: HOME, file: ".claude.json" },
+    { dir: path.join(HOME, ".cursor"), file: "mcp.json" },
+    ...toWatchTarget(claudeDesktopConfigPath()),
+    ...toWatchTarget(vscodeUserConfigPath(vscodeUserDir)),
+  ];
+}
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("[MCP Workbench] activated");
 
-  const provider = new ServersProvider();
+  const vscodeUserDir = vscodeUserDirFromHost(context.globalStorageUri, vscode.env.uriScheme);
+  const provider = new ServersProvider(vscodeUserDir);
   const diagnostics = new McpDiagnostics();
   const health = new HealthStore(context.workspaceState);
   const launchTrust = new LaunchTrustStore(context.workspaceState);
@@ -80,16 +84,20 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand("mcpWorkbench.testServer", async (arg: unknown) => {
       const server = provider.serverForCommand(arg);
-      if (!server || !(await confirmLaunch(launchTrust, server))) {
+      if (!server) {
         return;
       }
-      showTester(server).catch((e) =>
+      const inputs = await approveLaunch(launchTrust, server);
+      if (!inputs) {
+        return;
+      }
+      showTester(server, inputs).catch((e) =>
         vscode.window.showErrorMessage(`MCP Workbench: could not open the tester: ${errorText(e)}`),
       );
     }),
     vscode.commands.registerCommand("mcpWorkbench.testConnection", async (arg: unknown) => {
       const server = provider.serverForCommand(arg);
-      if (!server || !(await confirmLaunch(launchTrust, server))) {
+      if (!server) {
         return;
       }
       const id = serverId(server);
@@ -98,18 +106,18 @@ export function activate(context: vscode.ExtensionContext) {
       }
       probing.add(id);
       try {
+        const inputs = await approveLaunch(launchTrust, server);
+        if (!inputs) {
+          return;
+        }
         const result = await vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: `MCP Workbench: testing ${server.name}…` },
-          () => probe(server, PROBE_TIMEOUT_MS),
+          () => probe(server, PROBE_TIMEOUT_MS, inputs),
         );
         await health.set(id, recordFromProbe(result, Date.now()));
         provider.redraw();
         if (result.ok) {
-          const count = result.toolCount ?? 0;
-          const tools = `${count} ${count === 1 ? "tool" : "tools"}`;
-          vscode.window.showInformationMessage(
-            `MCP Workbench: ${server.name} responded in ${result.latencyMs}ms with ${tools}.`,
-          );
+          vscode.window.showInformationMessage(probeSummary(server, result));
         } else {
           await showProbeError(server.name, result.error, result.detail);
         }
@@ -147,7 +155,7 @@ export function activate(context: vscode.ExtensionContext) {
     { dispose: () => watcher?.dispose() },
   );
 
-  for (const { dir, file } of GLOBAL_WATCH_TARGETS) {
+  for (const { dir, file } of globalWatchTargets(vscodeUserDir)) {
     const globalWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(dir, file));
     globalWatcher.onDidChange(refreshSoon);
     globalWatcher.onDidCreate(refreshSoon);
@@ -170,6 +178,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   return disposeTester();
+}
+
+function probeSummary(server: DiscoveredServer, result: ProbeResult): string {
+  const count = result.toolCount ?? 0;
+  const tools = result.toolsTruncated ? `${count} or more tools` : `${count} ${count === 1 ? "tool" : "tools"}`;
+  const summary = `MCP Workbench: ${server.name} responded in ${result.latencyMs}ms with ${tools}.`;
+  return fellBackToSse(server, result.connectedOver) ? `${summary} It refused Streamable HTTP, so it was reached over SSE.` : summary;
 }
 
 function errorText(e: unknown): string {
